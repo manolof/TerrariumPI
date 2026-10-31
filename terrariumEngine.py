@@ -551,6 +551,9 @@ class terrariumEngine(object):
             delete_ok = True
 
         elif issubclass(item, terrariumArea):
+            if item_id in self.enclosures[sub_id].areas:
+                # Stop the area first, so its night shifts do not stay behind on the sensors
+                self.enclosures[sub_id].areas[item_id].stop()
             self.enclosures[sub_id].delete(item_id)
             delete_ok = True
 

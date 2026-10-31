@@ -8,6 +8,7 @@ from pony import orm
 
 import terrariumAPI
 import terrariumArea
+import terrariumEngine
 from terrariumDatabase import Sensor, SensorHistory
 
 
@@ -166,3 +167,29 @@ def test_changing_to_day_clears_the_shift_without_writing(temp):
 
 def test_changing_to_night_sets_the_shift(temp):
     assert shift_after_update(temp, was_day=True, now_day=False) == -2
+
+
+def test_deleting_an_area_at_night_clears_its_shift():
+    area = load_area(is_day=False, difference=-2, sensors=["s"])
+    enclosure = terrariumEnclosure_stub(area)
+    engine = SimpleNamespace(enclosures={"e1": enclosure})
+    # The hardware classes are mocks in tests: give delete real classes to compare with
+    with mock.patch.multiple(
+        terrariumEngine, terrariumButton=type("B", (), {}), terrariumRelay=type("R", (), {}),
+        terrariumSensor=type("S", (), {}), terrariumWebcam=type("W", (), {}),
+    ):
+        assert terrariumEngine.terrariumEngine.delete(engine, terrariumArea.terrariumArea, area.id, "e1")
+    assert "s" not in Sensor.night_shifts
+    assert area.id not in enclosure.areas
+
+
+def terrariumEnclosure_stub(area):
+    # Same delete as terrariumEnclosure.delete
+    areas = {area.id: area}
+
+    def delete(area_id):
+        if area_id in areas:
+            del areas[area_id]
+        return True
+
+    return SimpleNamespace(areas=areas, delete=delete)
