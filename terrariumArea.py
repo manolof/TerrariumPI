@@ -21,6 +21,9 @@ from terrariumDatabase import Sensor, Playlist, Relay, Button, Area
 from terrariumUtils import terrariumCache, terrariumUtils, classproperty
 
 
+WEATHER_MODES = ("weather", "weather_inverse")
+
+
 class terrariumAreaException(TypeError):
     """There is a problem with loading a hardware sensor."""
 
@@ -970,8 +973,10 @@ class terrariumArea(object):
                 relay_states.append(self.enclosure.relays[relay].is_off())
 
         new_state = all(relay_states)
-        if (state is False and old_state is True and new_state is True) or (
-            state is True and old_state is True and new_state is False
+        # Only shutdowns the engine made keep the 15 minute wait in update(); a hand Off must not (weather modes)
+        if self.mode not in WEATHER_MODES and (
+            (state is False and old_state is True and new_state is True)
+            or (state is True and old_state is True and new_state is False)
         ):
             # Somewhere the power is turned off. Store the time for settle calculation
             logger.debug(
