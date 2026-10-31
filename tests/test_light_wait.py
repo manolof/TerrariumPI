@@ -52,54 +52,64 @@ def test_engine_shutdown_still_records_in_weather_mode():
     assert last_powered_on_after_relays_toggle_off(mode="weather") > 100
 
 
-# --- a light's delay counts from the schedule, not from the command ---
-from unittest import mock as _mock
-
-
-def remaining(on, now, delay, **state):
-    fake = SimpleNamespace(state={"day": dict(state)})
-    with _mock.patch.object(terrariumArea.datetime, "datetime") as dt:
+# --- a light's on delay counts from its timetable entry, not from the command ---
+def remaining(now, delay, timetable=None):
+    setup = {"day": {} if timetable is None else {"timetable": timetable}}
+    fake = SimpleNamespace(setup=setup)
+    with mock.patch.object(terrariumArea.datetime, "datetime") as dt:
         dt.now.return_value.timestamp.return_value = now
-        return terrariumArea.terrariumAreaLights._remaining_delay(fake, "day", delay, on)
+        return terrariumArea.terrariumAreaLights._remaining_delay(fake, "day", delay)
 
 
 def test_on_delay_in_full_at_the_scheduled_time():
-    assert remaining(True, 1000, 3600, begin=1000) == 3600
+    assert remaining(1000, 3600, [[1000, 9000]]) == 3600
 
 
 def test_on_delay_part_used():
-    assert remaining(True, 1600, 3600, begin=1000) == 3000
+    assert remaining(1600, 3600, [[1000, 9000]]) == 3000
 
 
 def test_on_delay_used_up():
-    assert remaining(True, 8200, 3600, begin=1000) == 0
+    assert remaining(8200, 3600, [[1000, 9000]]) == 0
 
 
-def test_on_delay_without_begin_is_the_full_delay():
-    assert remaining(True, 8200, 3600) == 3600
+def test_on_delay_without_timetable_is_the_full_delay():
+    assert remaining(8200, 3600) == 3600
 
 
-def test_off_delay_counts_from_end():
-    assert remaining(False, 4000, 600, end=5000) == 600
-    assert remaining(False, 5120, 600, end=5000) == 480
+def test_on_delay_counts_from_the_current_cycle():
+    assert remaining(9000, 3600, [[1000, 5000], [9000, 12000]]) == 3600
 
 
-def test_no_delay_is_always_zero():
-    assert remaining(False, 9999, 0, end=5000) == 0
+def _action(on, relay_extra=None, delay=3600):
+    relay = SimpleNamespace(id="r1", name="Main", is_dimmer=False, ON=100, OFF=0, state=0)
+    if relay_extra:
+        relay.__dict__.update(relay_extra)
+    calls = []
+    fake = SimpleNamespace(
+        setup={
+            "day": {
+                "timetable": [[1000, 9000]],
+                "tweaks": {"r1": {"on": {"duration": 60, "delay": delay}, "off": {"duration": 60, "delay": delay}}},
+            }
+        },
+        enclosure=SimpleNamespace(relays={"r1": SimpleNamespace(on=lambda *a, **k: calls.append((a, k)) or True)}),
+    )
+    fake._remaining_delay = lambda part, d: terrariumArea.terrariumAreaLights._remaining_delay(fake, part, d)
+    with mock.patch.object(terrariumArea.datetime, "datetime") as dt:
+        dt.now.return_value.timestamp.return_value = 1600
+        terrariumArea.terrariumAreaLights._relay_action(fake, "day", relay, on)
+    return calls
 
 
 def test_relay_action_passes_the_remaining_delay():
-    relay = SimpleNamespace(id="r1", name="Main", is_dimmer=False, ON=100, OFF=0)
-    calls = []
-    fake = SimpleNamespace(
-        state={"day": {"begin": 1000}},
-        setup={"day": {"tweaks": {"r1": {"on": {"duration": 0, "delay": 3600}}}}},
-        enclosure=SimpleNamespace(relays={"r1": SimpleNamespace(on=lambda *a, **k: calls.append((a, k)) or True)}),
-    )
-    fake._remaining_delay = lambda part, delay, on: terrariumArea.terrariumAreaLights._remaining_delay(
-        fake, part, delay, on
-    )
-    with _mock.patch.object(terrariumArea.datetime, "datetime") as dt:
-        dt.now.return_value.timestamp.return_value = 1600
-        terrariumArea.terrariumAreaLights._relay_action(fake, "day", relay, True)
-    assert calls == [((100,), {"delay": 3000})]
+    assert _action(True) == [((100,), {"delay": 3000})]
+
+
+def test_relay_action_passes_the_remaining_delay_to_a_dimmer():
+    calls = _action(True, {"is_dimmer": True})
+    assert calls[0][1]["delay"] == 3000
+
+
+def test_relay_action_off_passes_the_full_delay():
+    assert _action(False) == [((0,), {"delay": 3600})]
