@@ -1026,6 +1026,14 @@ class terrariumArea(object):
 class terrariumAreaLights(terrariumArea):
     PERIODS = ["day", "night"]
 
+    def _remaining_delay(self, part, delay: float, on: bool) -> float:
+        # Count the tweak delay from the scheduled switch time, not from the moment of the command
+        base = self.state[part].get("begin" if on else "end")
+        if base is None:
+            return delay
+
+        return min(delay, max(0.0, base + delay - int(datetime.datetime.now().timestamp())))
+
     def _relay_action(self, part, relay, action) -> None:
         if relay.id not in self.enclosure.relays:
             return
@@ -1039,6 +1047,8 @@ class terrariumAreaLights(terrariumArea):
             delay = tweaks["delay"]
         except Exception as ex:
             logger.debug(f'Could not find the tweaks: {relay.id}, state {"on" if action else "off"}, error: {ex}')
+
+        delay = self._remaining_delay(part, delay, action)
 
         if relay.is_dimmer:
             step_size = duration / (relay.ON - relay.OFF)

@@ -50,3 +50,56 @@ def test_timer_mode_is_unchanged():
 
 def test_engine_shutdown_still_records_in_weather_mode():
     assert last_powered_on_after_relays_toggle_off(mode="weather") > 100
+
+
+# --- a light's delay counts from the schedule, not from the command ---
+from unittest import mock as _mock
+
+
+def remaining(on, now, delay, **state):
+    fake = SimpleNamespace(state={"day": dict(state)})
+    with _mock.patch.object(terrariumArea.datetime, "datetime") as dt:
+        dt.now.return_value.timestamp.return_value = now
+        return terrariumArea.terrariumAreaLights._remaining_delay(fake, "day", delay, on)
+
+
+def test_on_delay_in_full_at_the_scheduled_time():
+    assert remaining(True, 1000, 3600, begin=1000) == 3600
+
+
+def test_on_delay_part_used():
+    assert remaining(True, 1600, 3600, begin=1000) == 3000
+
+
+def test_on_delay_used_up():
+    assert remaining(True, 8200, 3600, begin=1000) == 0
+
+
+def test_on_delay_without_begin_is_the_full_delay():
+    assert remaining(True, 8200, 3600) == 3600
+
+
+def test_off_delay_counts_from_end():
+    assert remaining(False, 4000, 600, end=5000) == 600
+    assert remaining(False, 5120, 600, end=5000) == 480
+
+
+def test_no_delay_is_always_zero():
+    assert remaining(False, 9999, 0, end=5000) == 0
+
+
+def test_relay_action_passes_the_remaining_delay():
+    relay = SimpleNamespace(id="r1", name="Main", is_dimmer=False, ON=100, OFF=0)
+    calls = []
+    fake = SimpleNamespace(
+        state={"day": {"begin": 1000}},
+        setup={"day": {"tweaks": {"r1": {"on": {"duration": 0, "delay": 3600}}}}},
+        enclosure=SimpleNamespace(relays={"r1": SimpleNamespace(on=lambda *a, **k: calls.append((a, k)) or True)}),
+    )
+    fake._remaining_delay = lambda part, delay, on: terrariumArea.terrariumAreaLights._remaining_delay(
+        fake, part, delay, on
+    )
+    with _mock.patch.object(terrariumArea.datetime, "datetime") as dt:
+        dt.now.return_value.timestamp.return_value = 1600
+        terrariumArea.terrariumAreaLights._relay_action(fake, "day", relay, True)
+    assert calls == [((100,), {"delay": 3000})]
