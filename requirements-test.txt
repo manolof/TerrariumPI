@@ -1,0 +1,2 @@
+pytest
+pony==0.7.19
