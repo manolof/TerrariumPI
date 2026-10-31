@@ -495,6 +495,9 @@ class Sensor(db.Entity):
     __MAX_VALUE_AGE = 5 * 60  # Max age of the last measurement in minutes
     __VALUE_MODE = 2  # Mode 1: Only store first value. Mode 2: Store average value. Mode 3: Store last value.
 
+    # Night shift per sensor id. The area that uses the sensor sets it. The database always holds the day limits.
+    night_shifts = {}
+
     id = orm.PrimaryKey(str)
     hardware = orm.Required(str)
     type = orm.Required(str)
@@ -523,11 +526,19 @@ class Sensor(db.Entity):
             return 0.0
 
     @property
+    def active_alarm_min(self):
+        return self.alarm_min + Sensor.night_shifts.get(self.id, 0.0)
+
+    @property
+    def active_alarm_max(self):
+        return self.alarm_max + Sensor.night_shifts.get(self.id, 0.0)
+
+    @property
     def alarm(self) -> bool:
         if self.error:
             return False
 
-        return not self.alarm_min <= self.value <= self.alarm_max
+        return not self.active_alarm_min <= self.value <= self.active_alarm_max
 
     @property
     def value(self):
@@ -563,6 +574,9 @@ class Sensor(db.Entity):
         data["offset"] = self.offset
         data["alarm"] = self.alarm
         data["error"] = self.error
+        # Report the limits that are in use now. The stored day values stay in the database.
+        data["alarm_min"] = self.active_alarm_min
+        data["alarm_max"] = self.active_alarm_max
 
         return data
 
@@ -590,10 +604,10 @@ class Sensor(db.Entity):
                 self.limit_max if self.__VALUE_MODE == 3 else (sensor_data.limit_max + self.limit_max) / 2
             )
             sensor_data.alarm_min = (
-                self.alarm_min if self.__VALUE_MODE == 3 else (sensor_data.alarm_min + self.alarm_min) / 2
+                self.active_alarm_min if self.__VALUE_MODE == 3 else (sensor_data.alarm_min + self.active_alarm_min) / 2
             )
             sensor_data.alarm_max = (
-                self.alarm_max if self.__VALUE_MODE == 3 else (sensor_data.alarm_max + self.alarm_max) / 2
+                self.active_alarm_max if self.__VALUE_MODE == 3 else (sensor_data.alarm_max + self.active_alarm_max) / 2
             )
 
             sensor_data.exclude_avg = self.exclude_avg
@@ -605,8 +619,8 @@ class Sensor(db.Entity):
                 value=value,
                 limit_min=self.limit_min,
                 limit_max=self.limit_max,
-                alarm_min=self.alarm_min,
-                alarm_max=self.alarm_max,
+                alarm_min=self.active_alarm_min,
+                alarm_max=self.active_alarm_max,
                 exclude_avg=self.exclude_avg,
             )
 

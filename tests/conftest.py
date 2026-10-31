@@ -36,6 +36,9 @@ STUBBED_MODULES = [
     "dotenv",
     "requests",
     "gpiozero",
+    "bottle",
+    "ffprobe",
+    "ansi2html",
     # engine modules with hardware or network needs
     "terrariumAudio",
     "terrariumCalendar",
@@ -49,6 +52,7 @@ STUBBED_MODULES = [
     "hardware.relay",
     "hardware.button",
     "hardware.webcam",
+    "hardware.display",
 ]
 
 
@@ -96,8 +100,12 @@ def sensor_db(_bound_db):
     from pony import orm
 
     def clear():
+        from terrariumDatabase import Sensor
+
+        Sensor.night_shifts.clear()
         with orm.db_session():
-            for entity in _bound_db.entities.values():
+            # Rows that point at others (the history tables) go first, because of the foreign keys
+            for entity in sorted(_bound_db.entities.values(), key=lambda e: "History" not in e.__name__):
                 entity.select().delete(bulk=True)
 
     clear()

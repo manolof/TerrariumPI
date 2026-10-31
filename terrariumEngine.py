@@ -799,8 +799,8 @@ class terrariumEngine(object):
                     continue
 
                 data[sensor.type]["value"] += sensor.value
-                data[sensor.type]["alarm_min"] += sensor.alarm_min
-                data[sensor.type]["alarm_max"] += sensor.alarm_max
+                data[sensor.type]["alarm_min"] += sensor.active_alarm_min
+                data[sensor.type]["alarm_max"] += sensor.active_alarm_max
                 data[sensor.type]["limit_min"] += sensor.limit_min
                 data[sensor.type]["limit_max"] += sensor.limit_max
 

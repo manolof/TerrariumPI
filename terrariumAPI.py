@@ -1666,7 +1666,7 @@ class terrariumAPI(object):
     def sensor_list(self, filter=None):
         return {
             "data": [
-                self.sensor_detail(sensor.id)
+                sensor.to_dict()
                 for sensor in Sensor.select(lambda s: not s.id in self.webserver.engine.settings["exclude_ids"])
                 if filter is None or filter == sensor.type
             ]
@@ -1675,7 +1675,12 @@ class terrariumAPI(object):
     @orm.db_session(sql_debug=DEBUG, show_values=DEBUG)
     def sensor_detail(self, sensor):
         try:
-            return Sensor[sensor].to_dict()
+            sensor_data = Sensor[sensor]
+            data = sensor_data.to_dict()
+            # The classic form edits the stored day values, so it gets those and not the limits in use now
+            data["alarm_min"] = sensor_data.alarm_min
+            data["alarm_max"] = sensor_data.alarm_max
+            return data
         except orm.core.ObjectNotFound:
             raise HTTPError(status=404, body=f"Sensor with id {sensor} does not exists.")
         except Exception as ex:

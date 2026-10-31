@@ -293,7 +293,21 @@ class terrariumArea(object):
 
         return True
 
+    def _drop_night_shifts(self) -> None:
+        for sensor_id in getattr(self, "setup", {}).get("sensors", []):
+            Sensor.night_shifts.pop(sensor_id, None)
+
+    def _apply_night_shift(self) -> None:
+        # The database holds the day limits. At night the sensors of this area get the day/night difference on top.
+        shift = 0.0
+        if self.state.get("is_day") is False:
+            shift = self.setup["day_night_difference"]
+
+        for sensor_id in self.setup.get("sensors", []):
+            Sensor.night_shifts[sensor_id] = shift
+
     def load_setup(self, data) -> None:
+        self._drop_night_shifts()
         self.setup = copy.deepcopy(data)
         self.setup["day_night_difference"] = (
             0.0
@@ -366,6 +380,8 @@ class terrariumArea(object):
             self._setup_variation_data()
 
         self.state["powered"] = self._powered
+
+        self._apply_night_shift()
 
     def _setup_variation_data(self) -> None:
         # Thanks to HTPProXy https://github.com/theyosh/TerrariumPI/issues/1009#issuecomment-2896732294
@@ -622,7 +638,7 @@ class terrariumArea(object):
                     sensor.alarm_max += sensor_diff
                     unit = self.enclosure.engine.units[self.state["sensors"]["unit"]]
                     logger.info(
-                        f"Variation change {sensor.type} sensor '{sensor.name}' for area '{self.name}'. New values min: {sensor.alarm_min:.2f}{unit}, max:{sensor.alarm_max:.2f}{unit}. New average is: {wanted_average_value:.2f}{unit}."
+                        f"Variation change {sensor.type} sensor '{sensor.name}' for area '{self.name}'. New values min: {sensor.active_alarm_min:.2f}{unit}, max:{sensor.active_alarm_max:.2f}{unit}. New average is: {wanted_average_value:.2f}{unit}."
                     )
 
         # Reload the current sensor values after changing them
@@ -696,6 +712,7 @@ class terrariumArea(object):
 
         old_is_day = self.state["is_day"]
         self.state["is_day"] = self.is_day
+        self._apply_night_shift()
 
         if "variation" in self.state and self.state["variation"]["dynamic"]:
             if old_is_day != self.state["is_day"] or int(datetime.datetime.now().strftime("%H%M")) % 400 == 0:
@@ -703,18 +720,6 @@ class terrariumArea(object):
                 self._setup_variation_data()
 
         if "sensors" in self.setup and len(self.setup["sensors"]) > 0:
-            # Change the sensor limits when changing from day to night and vs.
-            if old_is_day != self.state["is_day"] and self.setup["day_night_difference"] != 0.0:
-                difference = self.setup["day_night_difference"] * (-1.0 if self.state["is_day"] else 1.0)
-                logger.info(
-                    f'Adjusting the sensors based on day/night difference. Changing by {difference} going from {("day" if old_is_day else "night")} to {("day" if self.state["is_day"] else "night")}'
-                )
-
-                with orm.db_session():
-                    for sensor in Sensor.select(lambda s: s.id in self.setup["sensors"]):
-                        sensor.alarm_min += difference
-                        sensor.alarm_max += difference
-
             # If there are sensors in use, calculate the current values
             self.state["sensors"] = self.current_value(self.setup["sensors"])
 
@@ -938,8 +943,8 @@ class terrariumArea(object):
                     continue
 
                 sensor_values["current"].append(sensor.value)
-                sensor_values["alarm_max"].append(sensor.alarm_max)
-                sensor_values["alarm_min"].append(sensor.alarm_min)
+                sensor_values["alarm_max"].append(sensor.active_alarm_max)
+                sensor_values["alarm_min"].append(sensor.active_alarm_min)
                 all_error = False
 
         for key in sensor_values:
@@ -1020,6 +1025,7 @@ class terrariumArea(object):
             self.enclosure.relays[f"{relay.id}"].on(relay.ON if action else relay.OFF)
 
     def stop(self) -> None:
+        self._drop_night_shifts()
         logger.info(f"Stopped Area {self}")
 
 
@@ -1455,11 +1461,11 @@ class terrariumAreaWatertank(terrariumArea):
             )
             sensor_values["alarm_max"].append(
                 self.setup["watertank_volume"]
-                - (sensor.alarm_min - self.setup["watertank_offset"]) * volume_per_distance
+                - (sensor.active_alarm_min - self.setup["watertank_offset"]) * volume_per_distance
             )
             sensor_values["alarm_min"].append(
                 self.setup["watertank_volume"]
-                - (sensor.alarm_max - self.setup["watertank_offset"]) * volume_per_distance
+                - (sensor.active_alarm_max - self.setup["watertank_offset"]) * volume_per_distance
             )
 
         for key in sensor_values:
