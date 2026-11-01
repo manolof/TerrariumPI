@@ -57,6 +57,8 @@ def stored_at_startup(raw, offset, limits):
     select.return_value.order_by.return_value = [row]
     with mock.patch.object(terrariumEngine, "Sensor", mock.MagicMock(select=select)), mock.patch.object(
         terrariumEngine, "terrariumSensorLoadingException", Exception
+    ), mock.patch.object(terrariumEngine.terrariumSensor, "available_hardware", {"test"}, create=True), mock.patch.object(
+        terrariumEngine, "terrariumSensorInvalidSensorTypeException", ValueError, create=True
     ):
         terrariumEngine.terrariumEngine._terrariumEngine__load_existing_sensors(engine)
     return stored

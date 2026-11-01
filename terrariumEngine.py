@@ -40,10 +40,13 @@ from terrariumArea import terrariumArea
 from terrariumCloud import TerrariumMerossCloud
 
 from weather import terrariumWeather
-from hardware.sensor import terrariumSensor, terrariumSensorLoadingException, terrariumSensorUnknownHardwareException
+from hardware.sensor import (
+    terrariumSensor,
+    terrariumSensorInvalidSensorTypeException,
+    terrariumSensorLoadingException,
+)
 from hardware.relay import (
     terrariumRelay,
-    terrariumRelayException,
     terrariumRelayLoadingException,
     terrariumRelayUpdateException,
 )
@@ -599,6 +602,13 @@ class terrariumEngine(object):
             for sensor in Sensor.select(lambda s: s.id not in self.settings["exclude_ids"]).order_by(Sensor.address):
                 start = time.time()
                 if sensor.id not in self.sensors:
+                    if sensor.hardware not in terrariumSensor.available_hardware:
+                        # The driver is not in this build. Leave the row alone and go on with the others.
+                        sensorLogger.warning(
+                            f"Skipping {sensor}, its hardware type '{sensor.hardware}' is not available."
+                        )
+                        continue
+
                     sensorLogger.debug(f"Loading {sensor}.")
                     try:
                         self.add(terrariumSensor(sensor.id, sensor.hardware, sensor.type, sensor.address, sensor.name))
@@ -609,11 +619,8 @@ class terrariumEngine(object):
                     except terrariumSensorLoadingException as ex:
                         sensorLogger.error(f"Error loading {sensor} with error: {ex}.")
                         continue
-                    except terrariumSensorUnknownHardwareException as ex:
-                        # The driver is not in this build. Leave the row alone and go on with the others.
-                        sensorLogger.warning(
-                            f"Skipping {sensor}, its hardware type '{sensor.hardware}' is not available: {ex}."
-                        )
+                    except terrariumSensorInvalidSensorTypeException as ex:
+                        sensorLogger.warning(f"Skipping {sensor}, the hardware does not support its type: {ex}.")
                         continue
 
                 else:
@@ -880,6 +887,13 @@ class terrariumEngine(object):
             for relay in Relay.select(lambda r: r.id not in self.settings["exclude_ids"]).order_by(Relay.address):
                 start = time.time()
                 if relay.id not in self.relays:
+                    if relay.hardware not in terrariumRelay.available_hardware:
+                        # The driver is not in this build. Leave the row alone and go on with the others.
+                        relayLogger.warning(
+                            f"Skipping relay {relay}, its hardware type '{relay.hardware}' is not available."
+                        )
+                        continue
+
                     relayLogger.debug(f"Loading {relay}.")
                     try:
                         self.add(
@@ -908,12 +922,6 @@ class terrariumEngine(object):
                         self.relays[relay.id].set_state(last_value, True)
                     except terrariumRelayLoadingException as ex:
                         relayLogger.error(f"Error loading relay {relay} with error: {ex}.")
-                        continue
-                    except terrariumRelayException as ex:
-                        # The driver is not in this build. Leave the row alone and go on with the others.
-                        relayLogger.warning(
-                            f"Skipping relay {relay}, its hardware type '{relay.hardware}' is not available: {ex}."
-                        )
                         continue
 
                 # Take a measurement from the relay

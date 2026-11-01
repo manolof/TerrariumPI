@@ -319,6 +319,7 @@ def restore(sensor_db, name, stored):
     hardware = SimpleNamespace(set_state=mock.MagicMock(), update=lambda: stored)
     with mock.patch.object(terrariumEngine, "terrariumRelay", return_value=hardware) as cls:
         cls.OFF, cls.ON = OFF, ON
+        cls.available_hardware = {"gpio"}
         terrariumEngine.terrariumEngine._terrariumEngine__load_existing_relays(engine)
     return hardware
 

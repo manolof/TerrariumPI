@@ -100,59 +100,84 @@ class SensorLoadingError(Exception):
     pass
 
 
-class SensorUnknownHardwareError(Exception):
+class SensorInvalidTypeError(Exception):
     pass
 
 
-class RelayError(Exception):
+class RelayLoadingError(Exception):
     pass
 
 
-class RelayLoadingError(RelayError):
+class RelayActionError(Exception):
     pass
 
 
-def _engine_with(attr, row_class_name, row, factory_name, error):
+def _load(attr, row_class_name, row, factory_name, available, factory_error=None, hardware_object=None):
+    """Run the engine's start-up loader for one stored row. `add` puts the hardware object in the engine's dict."""
     engine = SimpleNamespace(
         sensors={},
         relays={},
-        add=mock.MagicMock(),
         timed_relays=lambda: [],
         settings={"exclude_ids": []},
         callback_relay=None,
     )
+    engine.add = mock.MagicMock(side_effect=lambda item: getattr(engine, attr).update({row.id: item}))
     select = mock.MagicMock()
     select.return_value.order_by.return_value = [row]
-    factory = mock.MagicMock(side_effect=error)
+    factory = mock.MagicMock(side_effect=factory_error, return_value=hardware_object)
+    factory.available_hardware = available
     factory.OFF = 0.0
     with mock.patch.object(terrariumEngine, row_class_name, mock.MagicMock(select=select)), mock.patch.object(
         terrariumEngine, factory_name, factory
     ), mock.patch.object(terrariumEngine, "terrariumSensorLoadingException", SensorLoadingError), mock.patch.object(
-        terrariumEngine, "terrariumSensorUnknownHardwareException", SensorUnknownHardwareError, create=True
+        terrariumEngine, "terrariumSensorInvalidSensorTypeException", SensorInvalidTypeError
     ), mock.patch.object(
         terrariumEngine, "terrariumRelayLoadingException", RelayLoadingError
-    ), mock.patch.object(
-        terrariumEngine, "terrariumRelayException", RelayError, create=True
     ):
         getattr(terrariumEngine.terrariumEngine, f"_terrariumEngine__load_existing_{attr}")(engine)
-    return engine
+    return engine, factory
+
+
+def _warned(caplog, text):
+    return any(r.levelno == logging.WARNING and text in r.getMessage() for r in caplog.records)
 
 
 def test_a_stored_sensor_of_a_removed_type_is_skipped_with_a_warning(caplog):
     row = SimpleNamespace(id="abc", hardware="dht22", type="temperature", address="4", name="old")
-    error = SensorUnknownHardwareError("Trying to load an unknown sensor device dht22")
     with caplog.at_level(logging.WARNING):
-        engine = _engine_with("sensors", "Sensor", row, "terrariumSensor", error)
+        engine, factory = _load("sensors", "Sensor", row, "terrariumSensor", available={"bme280": object})
     assert engine.sensors == {}
-    engine.add.assert_not_called()
-    assert any(r.levelno == logging.WARNING and "dht22" in r.getMessage() for r in caplog.records)
+    factory.assert_not_called()
+    assert _warned(caplog, "dht22")
+
+
+def test_a_stored_sensor_with_an_unsupported_type_is_skipped_with_a_warning(caplog):
+    row = SimpleNamespace(id="abc", hardware="bme280", type="distance", address="76", name="odd")
+    error = SensorInvalidTypeError("Hardware does not have a distance sensor")
+    with caplog.at_level(logging.WARNING):
+        engine, _ = _load(
+            "sensors", "Sensor", row, "terrariumSensor", available={"bme280": object}, factory_error=error
+        )
+    assert engine.sensors == {}
+    assert _warned(caplog, "does not support")
 
 
 def test_a_stored_relay_of_a_removed_type_is_skipped_with_a_warning(caplog):
     row = SimpleNamespace(id="abc", hardware="sonoff", address="1.2.3.4", name="old", calibration={}, value=None)
-    error = RelayError("Relay of hardware type sonoff is unknown.")
     with caplog.at_level(logging.WARNING):
-        engine = _engine_with("relays", "Relay", row, "terrariumRelay", error)
+        engine, factory = _load("relays", "Relay", row, "terrariumRelay", available={"gpio": object})
     assert engine.relays == {}
-    engine.add.assert_not_called()
-    assert any(r.levelno == logging.WARNING and "sonoff" in r.getMessage() for r in caplog.records)
+    factory.assert_not_called()
+    assert _warned(caplog, "sonoff")
+
+
+def test_a_kept_relay_that_fails_to_restore_is_not_reported_as_a_missing_driver(caplog):
+    row = SimpleNamespace(id="abc", hardware="gpio", address="17", name="light", calibration={}, value=100.0)
+    hardware = mock.MagicMock()
+    hardware.set_state.side_effect = RelayActionError("GPIO fault")
+    with caplog.at_level(logging.WARNING):
+        with pytest.raises(RelayActionError):
+            _load(
+                "relays", "Relay", row, "terrariumRelay", available={"gpio": object}, hardware_object=hardware
+            )
+    assert not _warned(caplog, "not available")
