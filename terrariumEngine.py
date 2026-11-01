@@ -31,7 +31,7 @@ from pyfancy.pyfancy import pyfancy
 from func_timeout import func_timeout, FunctionTimedOut
 
 from pony import orm
-from terrariumDatabase import init as init_db, db, Setting, Sensor, Relay, Button, Webcam, Enclosure
+from terrariumDatabase import init as init_db, db, Setting, Sensor, Relay, Button, Webcam, Enclosure, Area
 from terrariumWebserver import terrariumWebserver
 from terrariumCalendar import terrariumCalendar
 from terrariumUtils import terrariumUtils, terrariumAsync, terrariumCache
@@ -101,6 +101,9 @@ class terrariumEngine(object):
         os.environ["SALT"] = salt
 
         self.meross_cloud = None
+
+        # Timed relay runs by relay id. Each holds the timer that switches the relay off again.
+        self.__timed_runs = {}
 
         self.version = version
         self.latest_version = None
@@ -852,6 +855,8 @@ class terrariumEngine(object):
         self.relays = {}
 
         with orm.db_session():
+            # A relay with a run time in an area is started by the area, and starts off after a restart
+            timed_relays = self.timed_relays()
             # TODO: Fix Meross better!!  and r.hardware != 'meross'
             for relay in Relay.select(lambda r: r.id not in self.settings["exclude_ids"]).order_by(Relay.address):
                 start = time.time()
@@ -871,8 +876,12 @@ class terrariumEngine(object):
 
                         # Set the relay back to the old state
                         last_value = relay.value
+                        if relay.id in timed_relays:
+                            # The area switches it on again when an alarm calls for it
+                            relayLogger.info(f"Relay {relay} has a run time in an area, starting it off.")
+                            last_value = terrariumRelay.OFF
                         # If we do not have a last value, try to get one from the relay
-                        if last_value is None:
+                        elif last_value is None:
                             # If no state info available, then asume off
                             last_value = self.relays[relay.id].update() or terrariumRelay.OFF
 
@@ -987,8 +996,93 @@ class terrariumEngine(object):
 
         self.send_websocket_totals(force_totals)
 
+    def timed_relays(self) -> set:
+        """The ids of the relays that have a run time (power_on_time above 0) in any period of any area."""
+        ids = set()
+        with orm.db_session():
+            for area in Area.select():
+                setup = area.setup if isinstance(area.setup, dict) else {}
+                for period in ("low", "high", "day", "night"):
+                    period_setup = setup.get(period)
+                    if not isinstance(period_setup, dict):
+                        continue
+
+                    try:
+                        power_on_time = float(period_setup.get("power_on_time", 0))
+                    except (TypeError, ValueError):
+                        power_on_time = 0
+
+                    if power_on_time > 0:
+                        ids.update(str(relay_id) for relay_id in period_setup.get("relays", []))
+
+        return ids
+
+    def relay_run(self, relay_id: str, seconds: int) -> dict:
+        """Switch a relay on for a number of seconds, then off. Raises ValueError when it is refused."""
+        if not isinstance(seconds, int) or isinstance(seconds, bool) or not 1 <= seconds <= 600:
+            raise ValueError("Seconds must be from 1 to 600.")
+
+        if relay_id not in self.timed_relays():
+            raise ValueError(f"Relay {relay_id} has no run time in an area.")
+
+        hardware = self.relays.get(relay_id)
+        if hardware is None:
+            raise ValueError(f"Relay {relay_id} is not loaded.")
+
+        if hardware.is_dimmer:
+            raise ValueError(f"Relay {relay_id} is a dimmer.")
+
+        with orm.db_session():
+            value = Relay[relay_id].value
+
+        if relay_id in self.__timed_runs or (value is not None and value != terrariumRelay.OFF):
+            raise ValueError(f"Relay {relay_id} is already on.")
+
+        if not hardware.set_state(terrariumRelay.ON):
+            raise ValueError(f"Relay {relay_id} could not be switched on.")
+
+        timer = threading.Timer(seconds, self.__relay_run_end, args=(relay_id,))
+        timer.daemon = True
+        self.__timed_runs[relay_id] = timer
+        timer.start()
+
+        relayLogger.info(f"Relay {relay_id} is on for {seconds} seconds.")
+        return {
+            "id": relay_id,
+            "seconds": seconds,
+            "until": (datetime.datetime.now() + datetime.timedelta(seconds=seconds)).isoformat(),
+        }
+
+    def relay_run_stop(self, relay_id: str) -> None:
+        """Cancel the timed run of a relay, if there is one. The relay itself is left as it is."""
+        timer = self.__timed_runs.pop(relay_id, None)
+        if timer is not None:
+            timer.cancel()
+            relayLogger.info(f"Cancelled the timed run of relay {relay_id}.")
+
+    def __relay_run_end(self, relay_id: str) -> None:
+        # The time is up: switch off the same way a hand Off does, which also removes the run
+        try:
+            with orm.db_session():
+                self.toggle_relay(Relay[relay_id], "off")
+        except Exception as ex:
+            relayLogger.error(f"Could not switch off relay {relay_id} at the end of a timed run: {ex}.")
+        finally:
+            self.__timed_runs.pop(relay_id, None)
+
+    def _stop_timed_runs(self) -> None:
+        for relay_id in list(self.__timed_runs):
+            self.relay_run_stop(relay_id)
+            try:
+                self.relays[relay_id].set_state(terrariumRelay.OFF)
+            except Exception as ex:
+                relayLogger.error(f"Could not switch off relay {relay_id} while stopping: {ex}.")
+
     def toggle_relay(self, relay, action: str = "toggle", duration: int = 0):
         ok = False
+
+        # Any hand action ends a timed run, so the timer cannot switch off what is then on by hand
+        self.relay_run_stop(relay.id)
 
         # Convert the action to an int value
         if "on" == action:
@@ -1806,6 +1900,8 @@ class terrariumEngine(object):
         for sensor in self.sensors:
             self.sensors[sensor].stop()
             logger.info(f"Stopped {self.sensors[sensor]}")
+
+        self._stop_timed_runs()
 
         for relay in self.relays:
             self.relays[relay].stop()

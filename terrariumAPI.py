@@ -418,6 +418,13 @@ class terrariumAPI(object):
             name="api:relay_action",
         )
         bottle_app.route(
+            "/api/relays/<relay:path>/run/<seconds:int>/",
+            "POST",
+            self.relay_run,
+            apply=self.authentication(),
+            name="api:relay_run",
+        )
+        bottle_app.route(
             "/api/relays/<relay:path>/manual/",
             "POST",
             self.relay_manual,
@@ -1405,6 +1412,23 @@ class terrariumAPI(object):
             raise HTTPError(status=404, body=f"Relay with id {relay} does not exists.")
         except Exception as ex:
             raise HTTPError(status=500, body=f"Error getting relay {relay} detail. {ex}")
+
+    @orm.db_session(sql_debug=DEBUG, show_values=DEBUG)
+    def relay_run(self, relay, seconds: int):
+        try:
+            relay = Relay[relay]
+        except orm.core.ObjectNotFound:
+            raise HTTPError(status=404, body=f"Relay with id {relay} does not exists.")
+
+        if not 1 <= seconds <= 600:
+            raise HTTPError(status=400, body="Seconds must be from 1 to 600.")
+
+        try:
+            return self.webserver.engine.relay_run(relay.id, seconds)
+        except ValueError as ex:
+            raise HTTPError(status=409, body=f"Relay {relay.id} can not be run for a time. {ex}")
+        except Exception as ex:
+            raise HTTPError(status=500, body=f"Error running relay {relay.id}. {ex}")
 
     @orm.db_session(sql_debug=DEBUG, show_values=DEBUG)
     def relay_manual(self, relay):
