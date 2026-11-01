@@ -108,6 +108,11 @@ def reading(sensor_id, value):
         Sensor[sensor_id].update(value)
 
 
+def no_reading(sensor_id):
+    with orm.db_session():
+        Sensor[sensor_id].history.select().delete(bulk=True)
+
+
 @pytest.fixture
 def home(sensor_db):
     """The live enclosure: four areas from the fixture, on fake relays and real database rows."""
@@ -418,8 +423,98 @@ def test_watertank_volume_from_a_distance_reading(sensor_db):
         values = area.current_value(["tank"])
 
     assert values == pytest.approx(
-        {"current": 90.0, "alarm_min": 40.0, "alarm_max": 160.0, "alarm": False, "unit": "watertank"}
+        {
+            "current": 90.0,
+            "alarm_min": 40.0,
+            "alarm_max": 160.0,
+            "alarm": False,
+            "unit": "watertank",
+            "all_error": False,
+        }
     )
+
+
+def test_a_tank_with_a_low_relay_follows_its_sensor_and_goes_off_when_it_fails(sensor_db):
+    pump = FakeRelay("pump", "Pump")
+    with orm.db_session():
+        Relay(id=pump.id, hardware="test", name=pump.name, address="1")
+        Sensor(id="tank", hardware="test", type="distance", name="d", address="1", alarm_min=20.0, alarm_max=80.0)
+    data = {
+        "id": "w1",
+        "type": "watertank",
+        "name": "Tank",
+        "mode": "sensors",
+        "setup": {
+            "sensors": ["tank"],
+            "watertank_height": 100,
+            "watertank_offset": 10,
+            "watertank_volume": 180,
+            "low": {"relays": [pump.id]},
+            "high": {"relays": []},
+        },
+    }
+    enclosure = SimpleNamespace(relays={pump.id: pump}, add=lambda area: area, name="Home", main_lights=None)
+    area = load(enclosure, data)
+
+    def update():
+        # The engine runs this inside its own database session
+        with orm.db_session():
+            area.update()
+
+    reading("tank", 55.0)
+    update()
+    assert area.state["sensors"]["all_error"] is False
+    assert pump.is_off()
+
+    reading("tank", 95.0)
+    update()
+    assert area.state["sensors"]["alarm_low"] is True
+    assert pump.is_on()
+
+    no_reading("tank")
+    update()
+    assert area.state["sensors"]["all_error"] is True
+    assert pump.is_off()
+
+
+# --- one failing area ---
+def test_one_failing_area_does_not_stop_the_next(home, caplog):
+    updated = []
+    for area in home.areas.values():
+        area.update = lambda read_only, area=area: updated.append(area.name) or area.state
+
+    def broken(read_only):
+        home.areas["Light"].state["powered"] = "half way"
+        raise KeyError("broken")
+
+    home.areas["Light"].state["powered"] = True
+    home.areas["Light"].update = broken
+
+    with caplog.at_level("ERROR"):
+        states = home.enclosure.update()
+
+    assert sorted(updated) == sorted(set(LIVE_AREAS) - {"Light"})
+    assert len(states) == 4
+    # The failed area reports the state it had before this round
+    assert states[home.areas["Light"].id]["powered"] is True
+
+    record = next(record for record in caplog.records if "Light" in record.getMessage())
+    assert record.levelname == "ERROR"
+    assert record.exc_info is not None
+
+
+# --- a period that lost its relays ---
+def test_a_heater_area_survives_losing_the_last_relay_of_a_period(home):
+    area = home.areas["Heat"]
+    setup = copy.deepcopy(LIVE_AREAS["Heat"]["setup"])
+    setup["high"]["relays"] = [MIST]
+    area.load_setup(setup)
+    assert "high" in area.state
+
+    area.load_setup(LIVE_AREAS["Heat"]["setup"])
+
+    assert "high" not in area.setup
+    assert area.state["powered"] is False
 
 
 # --- stored limits ---

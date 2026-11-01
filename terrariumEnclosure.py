@@ -100,7 +100,13 @@ class terrariumEnclosure(object):
                 # This area is already processed...
                 continue
 
-            area_states[area_id] = self.areas[area_id].update(read_only)
+            # One failing area must not stop the others, or the engine loop that runs them all
+            try:
+                # A failed area reports the state it had before this update
+                area_states[area_id] = copy.deepcopy(self.areas[area_id].state)
+                area_states[area_id] = self.areas[area_id].update(read_only)
+            except Exception as ex:
+                logger.exception(f"Error updating area {self.areas[area_id].name}: {ex}")
 
         return area_states
 

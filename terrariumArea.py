@@ -780,12 +780,13 @@ class terrariumAreaLights(terrariumArea):
 
         self.state["powered"] = self._powered
 
+
 class terrariumAreaHeater(terrariumArea):
     @property
     def _powered(self):
         powered = None
         for period in self.PERIODS:
-            if period not in self.state or len(self.setup[period]["relays"]) == 0:
+            if period not in self.state or self.setup.get(period) is None or len(self.setup[period]["relays"]) == 0:
                 continue
 
             powered = powered or (not self.relays_state(period, False))
@@ -817,9 +818,12 @@ class terrariumAreaWatertank(terrariumArea):
         volume_per_distance = self.setup["watertank_volume"] / distance
 
         sensor_values = {"current": [], "alarm_max": [], "alarm_min": [], "unit": "watertank"}
+        all_error = None
         for sensor in Sensor.select(lambda s: s.id in sensors):
             if sensor.value is None:
                 # Broken sensor, so ignore it
+                if all_error is None:
+                    all_error = True
                 continue
 
             sensor_values["current"].append(
@@ -833,6 +837,7 @@ class terrariumAreaWatertank(terrariumArea):
                 self.setup["watertank_volume"]
                 - (sensor.active_alarm_max - self.setup["watertank_offset"]) * volume_per_distance
             )
+            all_error = False
 
         for key in sensor_values:
             if "unit" == key:
@@ -843,5 +848,7 @@ class terrariumAreaWatertank(terrariumArea):
         sensor_values["alarm"] = (
             not sensor_values["alarm_min"] <= sensor_values["current"] <= sensor_values["alarm_max"]
         )
+
+        sensor_values["all_error"] = all_error == True
 
         return sensor_values
