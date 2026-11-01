@@ -40,8 +40,13 @@ from terrariumArea import terrariumArea
 from terrariumCloud import TerrariumMerossCloud
 
 from weather import terrariumWeather
-from hardware.sensor import terrariumSensor, terrariumSensorLoadingException
-from hardware.relay import terrariumRelay, terrariumRelayLoadingException, terrariumRelayUpdateException
+from hardware.sensor import terrariumSensor, terrariumSensorLoadingException, terrariumSensorUnknownHardwareException
+from hardware.relay import (
+    terrariumRelay,
+    terrariumRelayException,
+    terrariumRelayLoadingException,
+    terrariumRelayUpdateException,
+)
 from hardware.button import terrariumButton, terrariumButtonLoadingException
 from hardware.webcam import terrariumWebcam, terrariumWebcamLoadingException
 
@@ -604,6 +609,12 @@ class terrariumEngine(object):
                     except terrariumSensorLoadingException as ex:
                         sensorLogger.error(f"Error loading {sensor} with error: {ex}.")
                         continue
+                    except terrariumSensorUnknownHardwareException as ex:
+                        # The driver is not in this build. Leave the row alone and go on with the others.
+                        sensorLogger.warning(
+                            f"Skipping {sensor}, its hardware type '{sensor.hardware}' is not available: {ex}."
+                        )
+                        continue
 
                 else:
                     sensorLogger.debug(f"Updated already loaded {self.sensors[sensor.id]}.")
@@ -897,6 +908,12 @@ class terrariumEngine(object):
                         self.relays[relay.id].set_state(last_value, True)
                     except terrariumRelayLoadingException as ex:
                         relayLogger.error(f"Error loading relay {relay} with error: {ex}.")
+                        continue
+                    except terrariumRelayException as ex:
+                        # The driver is not in this build. Leave the row alone and go on with the others.
+                        relayLogger.warning(
+                            f"Skipping relay {relay}, its hardware type '{relay.hardware}' is not available: {ex}."
+                        )
                         continue
 
                 # Take a measurement from the relay

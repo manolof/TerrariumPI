@@ -40,39 +40,12 @@ smbus==1.1.post2
 # Github version has some serious patches which we need. Pyipi version is outdated
 git+https://github.com/IanHarvey/bluepy
 requests==2.34.2
-melopero_amg8833==0.2.1
 RPi.bme280==0.2.4
 RPi.GPIO==0.7.1
 pyserial==3.5
-pigpio_dht==0.3.6
 pigpio==1.78
-mitemp_bt==0.0.5
-git+https://github.com/afer92/lywsd03mmc
-PyMLX90614==0.0.4
-pyownet==0.10.0.post1
-veml6075==0.0.2
-lib8relay==1.0.3
-pylibftdi==0.24.0
-# Kasa update 0.7.X needs new code
-python-kasa==0.6.2.1
 meross-iot==0.4.10.4
-PCA9685-driver==1.2.0
-pywemo==2.1.2
 simple-pid==2.0.1
-sparkfun-qwiic-relay==0.0.2
-sensirion-i2c-driver==1.0.2
-sensirion-i2c-sht==0.4.0
-bme680==2.0.0
-Adafruit-Blinka==9.1.0
-adafruit-circuitpython-sht31d==2.3.31
-adafruit-circuitpython-busdevice==5.2.17
-SM8relind==1.0.4
-SM4relind==1.0.5
-py-AHTx0==0.1.2
-git+https://github.com/SequentMicrosystems/4relay-rpi.git#subdirectory=python/4relay
-git+https://github.com/almottier/TapoP100
-git+https://github.com/PiSupply/Bright-Pi
-adafruit-circuitpython-seesaw==1.18.2
 pcf8575==0.3
 
 # Calendar and utils
@@ -96,5 +69,4 @@ python-telegram-bot[socks,http2]==22.8
 # Overrule versions
 # Force to latest version
 icalendar==7.1.2
-adafruit-circuitpython-typing==1.11.2
 pydantic==2.13.4

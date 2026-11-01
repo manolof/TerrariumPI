@@ -104,36 +104,6 @@ class terrariumRelayDimmerPWM(terrariumRelayDimmer):
         super().stop()
 
 
-class terrariumRelayDimmerNextEVO(terrariumRelayDimmerPWM):
-    HARDWARE = "nextevo-dimmer"
-    NAME = "NextEVO Universal AC MAINS Dimmer (MPDMv4.1)"
-
-    # PWM dimmer settings
-    _DIMMER_FREQ = 5000
-    # According to http://www.esp8266-projects.com/2017/04/raspberry-pi-domoticz-ac-dimmer-part-1/
-    # is 860 DIM value equal to 95% dimming -> 905 is 100% dimming
-    _DIMMER_MAXDIM = 870
-
-    def _load_hardware(self):
-        # Working inverse of the other dimmers. So when there is no input, output is full. And high input, is no output
-        if not self._legacy:
-            return PWMOutputDevice(
-                terrariumUtils.to_BCM_port_number(self.address), active_high=False, frequency=self._DIMMER_FREQ
-            )
-
-        return super()._load_hardware()
-
-    def _set_hardware_value(self, state) -> bool:
-        if not self._legacy:
-            super()._set_hardware_value(state)
-        else:
-            # Inverse state...
-            super()._set_hardware_value(100 - state)
-            self._dimmer_state = state
-
-        return True
-
-
 class terrariumRelayDimmerDC(terrariumRelayDimmerPWM):
     HARDWARE = "dc-dimmer"
     NAME = "DC Dimmer"
@@ -141,14 +111,3 @@ class terrariumRelayDimmerDC(terrariumRelayDimmerPWM):
     # DC dimmer settings
     _DIMMER_FREQ = 15000  # https://github.com/theyosh/TerrariumPI/issues/178#issuecomment-413697246
     _DIMMER_MAXDIM = 1000  # https://github.com/theyosh/TerrariumPI/issues/178#issuecomment-412667010
-
-
-class terrariumRelayDimmerIRF520(terrariumRelayDimmerPWM):
-    # https://opencircuit.nl/Product/IRF520-mosfet-module
-    # https://github.com/DrLex0/MightyVariableFan/blob/master/pi_files/pwm_server.py#L97
-    HARDWARE = "irf520-dimmer"
-    NAME = "IRF520 Dimmer"
-
-    # # Dimmer settings
-    _DIMMER_FREQ = 10000  # Tested with a 12V PC fan. Low freq. caused some high pitching noise
-    _DIMMER_MAXDIM = 100
