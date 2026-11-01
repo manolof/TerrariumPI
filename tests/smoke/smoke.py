@@ -44,6 +44,11 @@ HTTP_CHECKS = [
     "/",
 ]
 BAD_LOG = re.compile(r"\b(ImportError|ModuleNotFoundError|AttributeError|NameError|SyntaxError)\b")
+# Lines the log check ignores even though they match BAD_LOG: expected hardware errors, by exact text.
+# It is empty on purpose. Hardware that is not there shows up as OSError/FileNotFoundError/gpiozero errors
+# ("[Errno 2] No such file", "failed to connect"), none of which match BAD_LOG, so nothing needs
+# ignoring today. Add an exact line here, with a reason, only if a CI log shows a real hardware case.
+ALLOWED_LOG_LINES = ()
 EXPECTED_COUNTS = {"/api/areas/": 4, "/api/sensors/": 2, "/api/relays/": 4, "/api/enclosures/": 1}
 
 MIGRATE_AND_SEED = """
@@ -240,7 +245,7 @@ def main():
         logs = logs.stdout + logs.stderr
         engine_log = run(["docker", "exec", name, "cat", "/TerrariumPI/log/terrariumpi.log"], check=False)
         logs += "\n" + engine_log.stdout
-        bad = [line for line in logs.splitlines() if BAD_LOG.search(line)]
+        bad = [line for line in logs.splitlines() if BAD_LOG.search(line) and line.strip() not in ALLOWED_LOG_LINES]
         record("no ImportError/ModuleNotFoundError/AttributeError/NameError/SyntaxError in the logs", not bad)
         for line in bad[:20]:
             print("   ", line[:300])
