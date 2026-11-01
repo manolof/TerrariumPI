@@ -257,6 +257,15 @@ class terrariumAPI(object):
             name="api:notification_service_add",
         )
 
+        # Reboot/start API
+        bottle_app.route(
+            "/api/<action:re:(restart|reboot|shutdown)>/",
+            "POST",
+            self.server_action,
+            apply=self.authentication(),
+            name="api:server_action",
+        )
+
         # Relays API
         bottle_app.route(
             "/api/relays/<relay:path>/<action:re:(history)>/<period:re:(hour|day|week|month|year|replaced)>/",

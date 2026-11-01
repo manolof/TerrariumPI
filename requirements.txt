@@ -56,4 +56,5 @@ ansi2html==1.9.2
 
 # Notification packages
 emails==1.1.2
+paho-mqtt>=2.1.0,<3
 python-telegram-bot[socks,http2]==22.8

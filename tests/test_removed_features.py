@@ -163,3 +163,76 @@ def test_the_doors_are_closed_with_no_buttons(enclosure_class):
     enclosure = enclosure_class("e1", "Home", engine, ["a-door"], [])
     assert enclosure.door_closed is True
     assert enclosure.door_open is False
+
+
+def test_the_restart_route_is_kept(app):
+    # Both UIs POST /api/restart/; the handler needs the engine, so only the routing is checked
+    for action in ("restart", "reboot", "shutdown"):
+        assert call(app, "POST", f"/api/{action}/")[0] != 404, action
+    assert call(app, "GET", "/api/restart/")[0] == 405
+
+
+# Requirements
+IMPORT_TO_PACKAGE = {
+    "cv2": "opencv-python-headless",
+    "PIL": "pillow",
+    "paho": "paho-mqtt",
+    "bme280": "rpi.bme280",
+    "serial": "pyserial",
+    "dotenv": "python-dotenv",
+    "yoyo": "yoyo-migrations",
+    "telegram": "python-telegram-bot",
+    "RPi": "rpi.gpio",
+    "bluepy": "bluepy",
+    "websocket": "bottle_websocket",
+    "bottle_websocket": "bottle_websocket",
+    "geventwebsocket": "bottle_websocket",
+}
+
+
+def requirement_names():
+    import re
+
+    names = set()
+    for line in (ROOT / "requirements.txt").read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("git+"):
+            names.add(line.rstrip("/").split("/")[-1].lower())
+            continue
+        names.add(re.split(r"[\[<>=!~ ;]", line)[0].lower().replace("_", "-"))
+    return names
+
+
+def third_party(top):
+    import sysconfig
+
+    if top in sys.builtin_module_names or top in ("__future__", "builtins"):
+        return False
+    if (ROOT / f"{top}.py").exists() or (ROOT / top).is_dir():
+        return False
+    stdlib = Path(sysconfig.get_paths()["stdlib"])
+    for base in (stdlib, stdlib / "lib-dynload"):
+        if (base / f"{top}.py").exists() or (base / top).is_dir() or list(base.glob(f"{top}.*.pyd")) or list(base.glob(f"{top}.*.so")):
+            return False
+    return True
+
+
+def test_every_third_party_import_is_in_requirements():
+    required = requirement_names()
+    missing = set()
+    for path in list(ROOT.glob("terrarium*.py")) + list((ROOT / "hardware").rglob("*.py")):
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.Import):
+                tops = [alias.name.split(".")[0] for alias in node.names]
+            elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
+                tops = [node.module.split(".")[0]]
+            else:
+                continue
+            for top in tops:
+                if third_party(top):
+                    package = IMPORT_TO_PACKAGE.get(top, top).lower().replace("_", "-")
+                    if package not in required:
+                        missing.add(f"{path.name}: {top}")
+    assert sorted(missing) == []
