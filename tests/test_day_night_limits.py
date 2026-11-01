@@ -175,7 +175,7 @@ def test_deleting_an_area_at_night_clears_its_shift():
     engine = SimpleNamespace(enclosures={"e1": enclosure})
     # The hardware classes are mocks in tests: give delete real classes to compare with
     with mock.patch.multiple(
-        terrariumEngine, terrariumButton=type("B", (), {}), terrariumRelay=type("R", (), {}),
+        terrariumEngine, terrariumRelay=type("R", (), {}),
         terrariumSensor=type("S", (), {}), terrariumWebcam=type("W", (), {}),
     ):
         assert terrariumEngine.terrariumEngine.delete(engine, terrariumArea.terrariumArea, area.id, "e1")

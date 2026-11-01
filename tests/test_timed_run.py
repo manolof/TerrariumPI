@@ -236,9 +236,7 @@ def test_deleting_a_relay_during_a_run_switches_it_off(mist, timers):
     mist.relay_run("mist", 30)
     hardware = mist.relays["mist"]
     hardware.stop = mock.MagicMock()
-    with mock.patch.object(terrariumEngine, "terrariumRelay", FakeRelay), mock.patch.object(
-        terrariumEngine, "terrariumButton", type("B", (), {})
-    ):
+    with mock.patch.object(terrariumEngine, "terrariumRelay", FakeRelay):
         FakeRelay.OFF, FakeRelay.ON = OFF, ON
         assert mist.delete(FakeRelay, "mist") is True
     assert [c.args for c in hardware.set_state.call_args_list] == [(ON,), (OFF,)]

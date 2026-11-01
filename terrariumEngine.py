@@ -4,7 +4,6 @@ import terrariumLogging
 logger = terrariumLogging.logging.getLogger(__name__)
 sensorLogger = terrariumLogging.logging.getLogger("terrariumSensor")
 relayLogger = terrariumLogging.logging.getLogger("terrariumRelay")
-buttonLogger = terrariumLogging.logging.getLogger("terrariumButton")
 webcamLogger = terrariumLogging.logging.getLogger("terrariumWebcam")
 enclosureLogger = terrariumLogging.logging.getLogger("terrariumEnclosure")
 weatherLogger = terrariumLogging.logging.getLogger("terrariumWeather")
@@ -31,13 +30,11 @@ from pyfancy.pyfancy import pyfancy
 from func_timeout import func_timeout, FunctionTimedOut
 
 from pony import orm
-from terrariumDatabase import init as init_db, db, Setting, Sensor, Relay, Button, Webcam, Enclosure, Area
+from terrariumDatabase import init as init_db, db, Setting, Sensor, Relay, Webcam, Enclosure, Area
 from terrariumWebserver import terrariumWebserver
-from terrariumCalendar import terrariumCalendar
 from terrariumUtils import terrariumUtils, terrariumAsync, terrariumCache
 from terrariumEnclosure import terrariumEnclosure
 from terrariumArea import terrariumArea
-from terrariumCloud import TerrariumMerossCloud
 
 from weather import terrariumWeather
 from hardware.sensor import (
@@ -50,7 +47,6 @@ from hardware.relay import (
     terrariumRelayLoadingException,
     terrariumRelayUpdateException,
 )
-from hardware.button import terrariumButton, terrariumButtonLoadingException
 from hardware.webcam import terrariumWebcam, terrariumWebcamLoadingException
 
 from terrariumNotification import terrariumNotification
@@ -112,8 +108,6 @@ class terrariumEngine(object):
         salt = salt.split(":")[1].strip()
         os.environ["SALT"] = salt
 
-        self.meross_cloud = None
-
         # Timed relay runs by relay id. Each holds the timer that switches the relay off again.
         self.__timed_runs = {}
         self.__timed_runs_lock = threading.RLock()
@@ -155,9 +149,6 @@ class terrariumEngine(object):
         # Load Web server, as we need it for websocket communication (even when the web server is not yet started)
         self.webserver = terrariumWebserver(self)
 
-        # Loading calendar
-        self.calendar = terrariumCalendar()
-
         # Caching total power and water usage
         start = time.time()
         self.relays = {}
@@ -192,12 +183,6 @@ class terrariumEngine(object):
                 logger.warning("Scanning for new relays timed out after 30 seconds.")
 
         logger.info(f"Loaded {len(self.relays)} relays in {time.time()-start:.2f} seconds.")
-
-        # Loading buttons....
-        start = time.time()
-        logger.info("Loading existing buttons from database.")
-        self.__load_existing_buttons()
-        logger.info(f"Loaded {len(self.buttons)} buttons in {time.time()-start:.2f} seconds.")
 
         # Loading webcams
         start = time.time()
@@ -317,15 +302,6 @@ class terrariumEngine(object):
         # Force port number to an int.....
         settings["port"] = int(settings["port"])
 
-        # Set meross login into the current bash environment
-        # But first check if the credentials have changed.
-        meross_login = (
-            os.environ.get("MEROSS_EMAIL", None) != settings["meross_cloud_username"]
-            or os.environ.get("MEROSS_PASSWORD", None) != settings["meross_cloud_password"]
-        )
-        os.environ["MEROSS_EMAIL"] = settings["meross_cloud_username"]
-        os.environ["MEROSS_PASSWORD"] = settings["meross_cloud_password"]
-
         # Make sure we use PiGPIO daemon for PWM
         # Pin factories: https://gpiozero.readthedocs.io/en/latest/api_pins.html
         # rgpio should be the coming factory for Raspberry PI 5 https://github.com/gpiozero/gpiozero/pull/1129
@@ -425,18 +401,6 @@ class terrariumEngine(object):
                 # Force an update, due to maybe changing speed units or temperature.... lazy fix... :(
                 self.weather.update()
 
-        # Loading Meross cloud
-        if "" != settings["meross_cloud_username"] and "" != settings["meross_cloud_password"] and meross_login:
-            logger.info("Loading Meross cloud connection.")
-            if self.meross_cloud is not None:
-                logger.info("Stopping existing Meross cloud connection.")
-                self.meross_cloud.stop()
-
-            self.meross_cloud = TerrariumMerossCloud(
-                settings["meross_cloud_username"],
-                settings["meross_cloud_password"],
-            )
-
     # -=NEW=-
     def __update_checker(self):
         # Set the initial update to 1970 if this is the first update check.
@@ -466,10 +430,7 @@ class terrariumEngine(object):
 
     # -=NEW=-
     def add(self, item):
-        if isinstance(item, terrariumButton):
-            self.buttons[item.id] = item
-
-        elif isinstance(item, terrariumRelay):
+        if isinstance(item, terrariumRelay):
             self.relays[item.id] = item
 
         elif isinstance(item, terrariumSensor):
@@ -489,15 +450,7 @@ class terrariumEngine(object):
     def update(self, item, **data):
         update_ok = False
 
-        if issubclass(item, terrariumButton):
-            self.buttons[data["id"]].address = data["address"]
-            self.buttons[data["id"]].name = data["name"]
-            if "calibration" in data:
-                self.buttons[data["id"]].calibrate(data["calibration"])
-
-            update_ok = True
-
-        elif issubclass(item, terrariumRelay):
+        if issubclass(item, terrariumRelay):
             if data["id"] not in self.relays:
                 return self.add(item)
 
@@ -532,24 +485,19 @@ class terrariumEngine(object):
             update_ok = True
 
         elif issubclass(item, terrariumArea):
-            self.enclosures[data["enclosure"]].areas[data["id"]].name = data["name"]
-            self.enclosures[data["enclosure"]].areas[data["id"]].mode = data["mode"]
-            self.enclosures[data["enclosure"]].areas[data["id"]].load_setup(data["setup"])
+            if data["id"] in self.enclosures[data["enclosure"]].areas:
+                self.enclosures[data["enclosure"]].areas[data["id"]].name = data["name"]
+                self.enclosures[data["enclosure"]].areas[data["id"]].mode = data["mode"]
+                self.enclosures[data["enclosure"]].areas[data["id"]].load_setup(data["setup"])
 
-            update_ok = True
+                update_ok = True
 
         return update_ok
 
     def delete(self, item, item_id, sub_id=None):
         delete_ok = False
 
-        if issubclass(item, terrariumButton):
-            if item_id in self.buttons:
-                self.buttons[item_id].stop()
-                del self.buttons[item_id]
-            delete_ok = True
-
-        elif issubclass(item, terrariumRelay):
+        if issubclass(item, terrariumRelay):
             if item_id in self.relays:
                 # A relay with a timed run is switched off before it goes
                 self.__relay_run_abort(item_id)
@@ -1209,117 +1157,6 @@ class terrariumEngine(object):
         # Forcing new update when relay goes off. New 'on' period can be calculated
         self.send_websocket_totals(int(state) == 0)
 
-    def __load_existing_buttons(self) -> None:
-        self.buttons = {}
-
-        with orm.db_session():
-            for button in Button.select(lambda b: b.id not in self.settings["exclude_ids"]).order_by(Button.address):
-                start = time.time()
-                if button.id not in self.buttons:
-                    buttonLogger.debug(f"Loading {button}.")
-                    try:
-                        new_button = self.add(
-                            terrariumButton(button.id, button.hardware, button.address, button.name, self.button_action)
-                        )
-                        if button.calibration is not None:
-                            new_button.calibrate(button.calibration)
-
-                    except terrariumButtonLoadingException as ex:
-                        buttonLogger.error(f"Error loading {button} with error: {ex}.")
-                        continue
-
-                else:
-                    buttonLogger.debug(f"Updated already loaded {self.buttons[button.id]}.")
-                    # Update existing button with new address
-                    self.buttons[button.id].address = button.address
-
-                # Take a measurement from the button
-                value = self.buttons[button.id].update()
-                if value is None:
-                    buttonLogger.warning(
-                        f"{self.buttons[button.id]} had problems reading a new value during startup in {time.time()-start:.2f} seconds. Will be updated in the next round."
-                    )
-                else:
-                    # Store the new measurement value in the database
-                    button.update(value)
-                    buttonLogger.info(
-                        f"Loaded {self.buttons[button.id]} value {value:.2f} in {time.time()-start:.2f} seconds."
-                    )
-
-    def _update_buttons(self) -> None:
-        # Force an update every hour. This will make the graphs work better...
-        force_update = int(time.time()) % (60 * 60) <= terrariumEngine.__ENGINE_LOOP_TIMEOUT
-
-        buttons = []
-        with orm.db_session():
-            # Get all loaded buttons ordered by hardware address
-            buttons = sorted(
-                Button.select(lambda b: b.id in self.buttons.keys() and not b.id in self.settings["exclude_ids"])[:],
-                key=lambda item: item.address,
-            )
-
-        for button in buttons:
-            with orm.db_session():
-                current_value = button.value
-
-            start = time.time()
-            new_value = self.buttons[button.id].update()
-            measurement_time = time.time() - start
-
-            if new_value is None:
-                buttonLogger.warning(
-                    f"Could not take a new measurement from {self.buttons[button.id]}. Tried for {measurement_time:.2f} seconds. Skipping this update."
-                )
-                continue
-
-            with orm.db_session():
-                Button[button.id].update(new_value, force_update)
-                button_data = button.to_dict()
-
-            db_time = (time.time() - start) - measurement_time
-
-            buttonLogger.info(
-                f"Updated {self.buttons[button.id]} with new value {new_value:.2f} in {measurement_time+db_time:.2f} seconds."
-            )
-            buttonLogger.debug(
-                f"Updated {self.buttons[button.id]} with new value {new_value:.2f}. M: {measurement_time:.2f} sec, DB:{db_time:.2f} sec."
-            )
-
-            # Notification message
-            self.notification.message("button_update", button_data)
-
-            if new_value != current_value:
-                self.notification.message("button_change", button_data)
-
-            # A small sleep between sensor measurement to get a bit more responsiveness of the system
-            sleep(0.1)
-
-    def load_doors(self):
-        doors = []
-        with orm.db_session():
-            # Get all loaded buttons ordered by hardware address
-            for button in Button.select(
-                lambda b: b.id in self.buttons.keys()
-                and b.enclosure is not None
-                and not b.id in self.settings["exclude_ids"]
-            ):
-                doors.append(button.to_dict())
-
-        return doors
-
-    # TODO: DB Optimization
-    def button_action(self, button, state) -> None:
-        with orm.db_session():
-            button = Button[button]
-            button.update(state, True)
-            button_data = button.to_dict()
-
-        # Update the button state on the button page
-        self.webserver.websocket_message("button", button_data)
-
-        # Notification message
-        self.notification.message("button_action", button_data)
-
     def __load_existing_webcams(self) -> None:
         self.webcams = {}
 
@@ -1470,8 +1307,7 @@ class terrariumEngine(object):
                             str(enclosure.id),
                             enclosure.name,
                             self,
-                            [door.id for door in enclosure.doors],
-                            list(enclosure.areas),
+                            areas=list(enclosure.areas),
                         )
                     )
 
@@ -1514,7 +1350,7 @@ class terrariumEngine(object):
             self.__engine["systemd"].notify("WATCHDOG=1")
 
             logger.info(
-                f"Starting a new update round with {len(self.sensors)} sensors, {len(self.relays)} relays, {len(self.buttons)} buttons and {len(self.webcams)} webcams."
+                f"Starting a new update round with {len(self.sensors)} sensors, {len(self.relays)} relays and {len(self.webcams)} webcams."
             )
             start = time.time()
 
@@ -1529,7 +1365,6 @@ class terrariumEngine(object):
             with futures.ThreadPoolExecutor() as pool:
                 pool.submit(self._update_sensors)
                 pool.submit(self._update_relays)
-                pool.submit(self._update_buttons)
                 pool.submit(self._update_webcams)
                 pool.submit(self.__update_checker)
 
@@ -1976,10 +1811,6 @@ class terrariumEngine(object):
             self.enclosures[enclosure].stop()
             logger.info(f"Stopped {self.enclosures[enclosure]}")
 
-        for button in self.buttons:
-            self.buttons[button].stop()
-            logger.info(f"Stopped {self.buttons[button]}")
-
         for sensor in self.sensors:
             self.sensors[sensor].stop()
             logger.info(f"Stopped {self.sensors[sensor]}")
@@ -1994,9 +1825,6 @@ class terrariumEngine(object):
             self.webcams[webcam].stop()
             logger.info(f"Stopped {self.webcams[webcam]}")
 
-        if self.meross_cloud is not None:
-            self.meross_cloud.stop()
-
         shutdown_message = f"Stopped TerrariumPI {self.version} after running for {terrariumUtils.format_uptime(time.time()-self.starttime)}. Bye bye."
         self.notification.broadcast(shutdown_message, shutdown_message, self.settings["profile_image"])
         self.notification.stop()
@@ -2004,58 +1832,6 @@ class terrariumEngine(object):
         self.__engine["asyncio"].stop()
 
         logger.info(shutdown_message)
-
-    def replace_hardware_calender_event(self, switch_id, device, reminder_amount, reminder_period) -> None:
-        # Two events:
-        # 1. When it happened
-        # 2. Reminder for next time
-
-        current_time = datetime.date.today()
-        switch = self.power_switches[switch_id]
-        switch.set_last_hardware_replacement()
-        self.config.save_power_switch(switch.get_data())
-        self.calendar.create_event(
-            switch_id,
-            "{} hardware replacement".format(switch.get_name()),
-            "Replaced '{}' at power switch {}".format(device, switch.get_name()),
-            None,
-            current_time,
-        )
-
-        reminder = None
-        try:
-            if "days" == reminder_period:
-                reminder = datetime.timedelta(days=int(reminder_amount))
-            elif "weeks" == reminder_period:
-                reminder = datetime.timedelta(days=(int(reminder_amount) * 7))
-            elif "months" == reminder_period:
-                reminder = datetime.timedelta(days=(int(reminder_amount) * 30))
-            elif "years" == reminder_period:
-                reminder = datetime.timedelta(days=(int(reminder_amount) * 365))
-        except Exception as ex:
-            print(ex)
-
-        if reminder is not None:
-            current_time += reminder
-            self.calendar.create_event(
-                switch_id,
-                "Reminder {} hardware replacement".format(switch.get_name()),
-                "Replace '{}' at power switch {}".format(device, switch.get_name()),
-                None,
-                current_time,
-            )
-
-    # End Calendar part
-
-    def get_audio_playing(self, socket: bool = False):
-        data = self.__audio_player.get_current_state()
-
-        if socket:
-            self.__send_message({"type": "player_indicator", "data": data})
-        else:
-            return data
-
-    # End audio part
 
     # Environment part
     def get_environment(self, parameters=[], socket: bool = False):

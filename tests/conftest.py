@@ -37,22 +37,15 @@ STUBBED_MODULES = [
     "requests",
     "gpiozero",
     "bottle",
-    "ffprobe",
     "ansi2html",
     # engine modules with hardware or network needs
-    "terrariumAudio",
-    "terrariumCalendar",
-    "terrariumCloud",
-    "terrariumEnclosure",
     "terrariumNotification",
     "terrariumWebserver",
     "weather",
     "hardware",
     "hardware.sensor",
     "hardware.relay",
-    "hardware.button",
     "hardware.webcam",
-    "hardware.display",
 ]
 
 

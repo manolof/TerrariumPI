@@ -6,24 +6,19 @@ logger = terrariumLogging.logging.getLogger(__name__)
 import json
 import types
 from functools import partial
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta
 from pony import orm
 from bottle import request, response, static_file, HTTPError, JSONPlugin
 from json import dumps
 from pathlib import Path
-from ffprobe import FFProbe
-from hashlib import md5
 from uuid import uuid4
 from ansi2html import Ansi2HTMLConverter
 
 from terrariumArea import terrariumArea
-from terrariumAudio import terrariumAudio
 from terrariumDatabase import (
     Area,
-    Audiofile,
     Button,
     Enclosure,
-    Playlist,
     NotificationMessage,
     NotificationService,
     Relay,
@@ -35,8 +30,6 @@ from terrariumDatabase import (
 from terrariumEnclosure import terrariumEnclosure
 from terrariumNotification import terrariumNotification, terrariumNotificationService
 
-from hardware.button import terrariumButton
-from hardware.display import terrariumDisplay
 from hardware.relay import terrariumRelay
 from hardware.sensor import terrariumSensor
 from hardware.webcam import terrariumWebcam
@@ -96,126 +89,49 @@ class terrariumAPI(object):
         bottle_app.route("/api/areas/", "GET", self.area_list, apply=self.authentication(False), name="api:area_list")
         bottle_app.route("/api/areas/", "POST", self.area_add, apply=self.authentication(), name="api:area_add")
 
-        # Audio API
-        bottle_app.route(
-            "/api/audio/files/<audiofile:path>/",
-            "GET",
-            self.audiofile_detail,
-            apply=self.authentication(False),
-            name="api:audiofile_detail",
-        )
-        bottle_app.route(
-            "/api/audio/files/<audiofile:path>/",
-            "DELETE",
-            self.audiofile_delete,
-            apply=self.authentication(),
-            name="api:audiofile_delete",
-        )
-        bottle_app.route(
-            "/api/audio/files/", "GET", self.audiofile_list, apply=self.authentication(False), name="api:audiofile_list"
-        )
-        bottle_app.route(
-            "/api/audio/files/", "POST", self.audiofile_add, apply=self.authentication(), name="api:audiofile_add"
-        )
-        bottle_app.route(
-            "/api/audio/hardware/",
-            "GET",
-            self.audio_hardware,
-            apply=self.authentication(False),
-            name="api:audio_hardware",
-        )
+        # Removed features API (audio, buttons, calendar, displays, playlists)
+        # The classic pages still load: reads answer empty, writes answer 410 Gone.
+        for path, auth in [
+            ("/api/audio/hardware/", False),
+            ("/api/audio/files/", False),
+            ("/api/buttons/hardware/", True),
+            ("/api/buttons/", False),
+            ("/api/displays/hardware/", True),
+            ("/api/playlists/", False),
+        ]:
+            bottle_app.route(
+                path, "GET", self.removed_list, apply=self.authentication(auth), name=f"api:removed_list:{path}"
+            )
 
-        # Buttons API
-        bottle_app.route(
+        for path in [
             "/api/buttons/<button:path>/history/<period:re:(hour|day|week|month|year)>/",
-            "GET",
-            self.button_history,
-            apply=self.authentication(False),
-            name="api:button_history_period",
-        )
-        bottle_app.route(
             "/api/buttons/<button:path>/history/",
-            "GET",
-            self.button_history,
-            apply=self.authentication(False),
-            name="api:button_history",
-        )
-        bottle_app.route(
-            "/api/buttons/hardware/",
-            "GET",
-            self.button_hardware,
-            apply=self.authentication(),
-            name="api:button_hardware",
-        )
-        bottle_app.route(
-            "/api/buttons/<button:path>/",
-            "GET",
-            self.button_detail,
-            apply=self.authentication(False),
-            name="api:button_detail",
-        )
-        bottle_app.route(
-            "/api/buttons/<button:path>/",
-            "PUT",
-            self.button_update,
-            apply=self.authentication(),
-            name="api:button_update",
-        )
-        bottle_app.route(
-            "/api/buttons/<button:path>/",
-            "DELETE",
-            self.button_delete,
-            apply=self.authentication(),
-            name="api:button_delete",
-        )
-        bottle_app.route(
-            "/api/buttons/", "GET", self.button_list, apply=self.authentication(False), name="api:button_list"
-        )
-        bottle_app.route("/api/buttons/", "POST", self.button_add, apply=self.authentication(), name="api:button_add")
+        ]:
+            bottle_app.route(path, "GET", self.removed_history, apply=self.authentication(False), name=f"api:removed:{path}")
 
-        # Calendar API
         bottle_app.route(
-            "/api/calendar/<calendar:path>/",
-            "GET",
-            self.calendar_detail,
-            apply=self.authentication(False),
-            name="api:calendar_detail",
-        )
-        bottle_app.route(
-            "/api/calendar/<calendar:path>/",
-            "PUT",
-            self.calendar_update,
-            apply=self.authentication(),
-            name="api:calendar_update",
-        )
-        bottle_app.route(
-            "/api/calendar/<calendar:path>/",
-            "DELETE",
-            self.calendar_delete,
-            apply=self.authentication(),
-            name="api:calendar_delete",
+            "/api/calendar/", "GET", self.removed_calendar_list, apply=self.authentication(False), name="api:calendar_list"
         )
         bottle_app.route(
             "/api/calendar/download/",
             "GET",
-            self.calendar_download,
+            self.removed_calendar_download,
             apply=self.authentication(),
             name="api:calendar_download",
         )
-        bottle_app.route(
-            "/api/calendar/", "GET", self.calendar_list, apply=self.authentication(False), name="api:calendar_list"
-        )
-        bottle_app.route(
-            "/api/calendar/", "POST", self.calendar_add, apply=self.authentication(), name="api:calendar_add"
-        )
 
-        bottle_app.route(
-            "/api/displays/hardware/",
-            "GET",
-            self.display_hardware,
-            apply=self.authentication(),
-            name="api:display_hardware",
-        )
+        for path in [
+            "/api/audio/files/<audiofile:path>/",
+            "/api/buttons/<button:path>/",
+            "/api/calendar/<calendar:path>/",
+            "/api/playlists/<playlist:path>/",
+        ]:
+            bottle_app.route(path, "GET", self.removed_detail, apply=self.authentication(False), name=f"api:removed_detail:{path}")
+            for method in ["PUT", "DELETE"]:
+                bottle_app.route(path, method, self.removed_write, apply=self.authentication(), name=f"api:removed_{method}:{path}")
+
+        for path in ["/api/audio/files/", "/api/buttons/", "/api/calendar/", "/api/playlists/"]:
+            bottle_app.route(path, "POST", self.removed_write, apply=self.authentication(), name=f"api:removed_POST:{path}")
 
         # Enclosure API
         bottle_app.route(
@@ -339,44 +255,6 @@ class terrariumAPI(object):
             self.notification_service_add,
             apply=self.authentication(),
             name="api:notification_service_add",
-        )
-
-        # Playlist API
-        bottle_app.route(
-            "/api/playlists/<playlist:path>/",
-            "GET",
-            self.playlist_detail,
-            apply=self.authentication(False),
-            name="api:playlist_detail",
-        )
-        bottle_app.route(
-            "/api/playlists/<playlist:path>/",
-            "PUT",
-            self.playlist_update,
-            apply=self.authentication(),
-            name="api:playlist_update",
-        )
-        bottle_app.route(
-            "/api/playlists/<playlist:path>/",
-            "DELETE",
-            self.playlist_delete,
-            apply=self.authentication(),
-            name="api:playlist_delete",
-        )
-        bottle_app.route(
-            "/api/playlists/", "GET", self.playlist_list, apply=self.authentication(False), name="api:playlist_list"
-        )
-        bottle_app.route(
-            "/api/playlists/", "POST", self.playlist_add, apply=self.authentication(), name="api:playlist_add"
-        )
-
-        # Reboot/start API
-        bottle_app.route(
-            "/api/<action:re:(restart|reboot|shutdown)>/",
-            "POST",
-            self.server_action,
-            apply=self.authentication(),
-            name="api:server_action",
         )
 
         # Relays API
@@ -804,278 +682,26 @@ class terrariumAPI(object):
         except Exception as ex:
             raise HTTPError(status=500, body=f"Error deleting area {area}. {ex}")
 
-    # Audiofiles
-    def audio_hardware(self):
-        return {"data": terrariumAudio.available_soundcards}
+    # Removed features: audio, buttons, calendar, displays and playlists
+    def removed_list(self):
+        return {"data": []}
 
-    @orm.db_session(sql_debug=DEBUG, show_values=DEBUG)
-    def audiofile_list(self):
-        return {"data": [audiofile.to_dict() for audiofile in Audiofile.select()]}
+    def removed_history(self, button, period: str = "day"):
+        return {"data": []}
 
-    @orm.db_session(sql_debug=DEBUG, show_values=DEBUG)
-    def audiofile_detail(self, audiofile):
-        try:
-            return Audiofile[audiofile].to_dict()
-        except orm.core.ObjectNotFound:
-            raise HTTPError(status=404, body=f"Audio file with id {audiofile} does not exists.")
-        except Exception as ex:
-            raise HTTPError(status=500, body=f"Error getting audiofile {audiofile} detail. {ex}")
-
-    def audiofile_add(self):
-        __UPLOAD_PATH = "media/"
-        data = []
-        try:
-            for upload in request.files.getlist("audiofiles"):
-                upload.save(__UPLOAD_PATH, overwrite=True)
-                audio_file = Path(f"{__UPLOAD_PATH}{upload.filename}")
-                meta_data = FFProbe(str(audio_file.resolve()))
-
-                item = {
-                    "id": md5(f"{upload.filename}".encode()).hexdigest(),
-                    "name": f'{meta_data.metadata.get("title",None)} - {meta_data.metadata.get("artist",None)}',
-                    "filename": f"{audio_file.resolve()}",
-                    "duration": meta_data.streams[0].duration,
-                    "filesize": audio_file.stat().st_size,
-                }
-
-                try:
-                    with orm.db_session:
-                        audiofile = Audiofile(**item)
-                except orm.core.TransactionIntegrityError as e:
-                    if "UNIQUE constraint failed" in str(e):
-                        with orm.db_session:
-                            audiofile = Audiofile[item["id"]]
-                            audiofile.set(**item)
-
-                data.append(item)
-
-            return {"data": data}
-        except Exception as ex:
-            raise HTTPError(status=500, body=f"Error getting audio file {audiofile} detail. {ex}")
-
-    @orm.db_session(sql_debug=DEBUG, show_values=DEBUG)
-    def audiofile_delete(self, audiofile):
-        try:
-            audiofile = Audiofile[audiofile]
-            message = f"Audio file {audiofile.filename} is deleted."
-            audiofile.delete()
-            orm.commit()
-            return {"message": message}
-        except orm.core.ObjectNotFound:
-            raise HTTPError(status=404, body=f"Audio file with id {audiofile} does not exists.")
-        except Exception as ex:
-            raise HTTPError(status=500, body=f"Error deleting audiofile {audiofile}. {ex}")
-
-    # Buttons
-    def button_hardware(self):
-        return {"data": terrariumButton.available_buttons}
-
-    @orm.db_session(sql_debug=DEBUG, show_values=DEBUG)
-    def button_history(self, button, action: str = "history", period: str = "day"):
-        try:
-            button = Button[button]
-            if "hour" == period:
-                period = 1 / 24
-            elif "day" == period:
-                period = 1
-            elif "week" == period:
-                period = 7
-            elif "month" == period:
-                period = 31
-            elif "year" == period:
-                period = 365
-            else:
-                period = 1
-
-            history = [
-                {"timestamp": item.timestamp.timestamp(), "value": item.value}
-                for item in button.history.filter(lambda h: h.timestamp >= datetime.now() - timedelta(days=period))
-            ]
-
-            if "export" == action:
-                # CSV Headers
-                csv_data = [";".join(history[0].keys())]
-                # Data
-                for data_point in history:
-                    data_point["timestamp"] = datetime.fromtimestamp(data_point["timestamp"])
-                    csv_data.append(";".join([str(value) for value in data_point.values()]))
-
-                response.headers["Content-Type"] = "application/csv"
-                response.headers["Content-Disposition"] = f"attachment; filename={button.name}_{period}.csv"
-                return "\n".join(csv_data)
-
-            return {"data": history}
-
-        except orm.core.ObjectNotFound:
-            raise HTTPError(status=404, body=f"Button with id {button} does not exists.")
-        except Exception as ex:
-            raise HTTPError(status=500, body=f"Error getting history for button {button}: {ex}")
-
-    @orm.db_session(sql_debug=DEBUG, show_values=DEBUG)
-    def button_list(self):
-        return {
-            "data": [
-                self.button_detail(button.id)
-                for button in Button.select(lambda r: not r.id in self.webserver.engine.settings["exclude_ids"])
-            ]
-        }
-
-    @orm.db_session(sql_debug=DEBUG, show_values=DEBUG)
-    def button_detail(self, button):
-        try:
-            return Button[button].to_dict(exclude="enclosure")
-        except orm.core.ObjectNotFound:
-            raise HTTPError(status=404, body=f"Button with id {button} does not exists.")
-        except Exception as ex:
-            raise HTTPError(status=500, body=f"Error getting button {button}: {ex}")
-
-    @orm.db_session(sql_debug=DEBUG, show_values=DEBUG)
-    def button_add(self):
-        try:
-            new_button = self.webserver.engine.add(
-                terrariumButton(None, request.json["hardware"], request.json["address"], request.json["name"])
-            )
-            request.json["id"] = new_button.id
-            request.json["address"] = new_button.address
-
-            button = Button(**request.json)
-            new_value = new_button.update()
-            button.update(new_value)
-
-            return self.button_detail(button.id)
-        except Exception as ex:
-            raise HTTPError(status=500, body=f"Button could not be added: {ex}")
-
-    @orm.db_session(sql_debug=DEBUG, show_values=DEBUG)
-    def button_update(self, button):
-        try:
-            button = Button[button]
-            button.set(**request.json)
-            orm.commit()
-            self.webserver.engine.update(terrariumButton, **request.json)
-            return self.button_detail(button.id)
-        except orm.core.ObjectNotFound:
-            raise HTTPError(status=404, body=f"Button with id {button} does not exists.")
-        except Exception as ex:
-            raise HTTPError(status=500, body=f"Error updating button {button}: {ex}")
-
-    @orm.db_session(sql_debug=DEBUG, show_values=DEBUG)
-    def button_delete(self, button):
-        try:
-            message = f"Button {Button[button]} is deleted."
-            self.webserver.engine.delete(terrariumButton, button)
-            Button.select(lambda s: s.id == button).delete(bulk=True)
-            return {"message": message}
-        except orm.core.ObjectNotFound:
-            raise HTTPError(status=404, body=f"Button with id {button} does not exists.")
-        except Exception as ex:
-            raise HTTPError(status=500, body=f"Error deleting button {button}: {ex}")
-
-    # Calendar
-    def calendar_detail(self, calendar):
-        try:
-            data = self.webserver.engine.calendar.get_event(calendar)
-            if not data:
-                # TODO: Make raising a CalendarNotFound exception
-                raise HTTPError(status=404, body=f"Calender with id {calendar} does not exists.")
-
-            # Convert uid to id field
-            data["id"] = data["uid"]
-            del data["uid"]
-            return data
-        except Exception as ex:
-            raise HTTPError(status=500, body=f"Calender detail error. {ex}")
-
-    def calendar_delete(self, calendar):
-        data = self.calendar_detail(calendar)
-        if not self.webserver.engine.calendar.delete_event(data["id"]):
-            raise HTTPError(status=500, body=f'Calender event {data["summary"]} could not be removed.')
-
-        return {"message": f'Calender event {data["summary"]} is deleted.'}
-
-    def calendar_update(self, calendar):
-        data = self.calendar_detail(calendar)
-        for field in request.json:
-            if field in ["dtstart", "dtend"] and request.json[field]:
-                data[field] = datetime.fromtimestamp(int(request.json[field])).replace(tzinfo=timezone.utc)
-            else:
-                data[field] = request.json[field]
-
-        event = self.webserver.engine.calendar.create_event(
-            data["id"],
-            data["summary"],
-            data["description"],
-            data.get("location"),
-            data["dtstart"],
-            data.get("dtend"),
-            data.get("freq"),
-            data.get("interval"),
-        )
-
-        return self.calendar_detail(event["uid"])
-
-    def calendar_list(self):
-        start = request.query.get("start", None)
-        if start:
-            if start.endswith("Z"):
-                start = start[0:-1]
-
-            start = datetime.fromisoformat(start)
-
-        end = request.query.get("end", None)
-        if end:
-            if end.endswith("Z"):
-                end = end[0:-1]
-
-            end = datetime.fromisoformat(end)
-
-        # https://stackoverflow.com/a/12294213
+    def removed_calendar_list(self):
         response.content_type = "application/json"
-        events = [
-            {
-                "id": event["uid"],
-                "title": event["summary"],
-                "description": event["description"],
-                "url": event.get("location", None),
-                "start": datetime.fromtimestamp(event["dtstart"], timezone.utc).strftime("%Y-%m-%d"),
-                "end": datetime.fromtimestamp(event["dtend"], timezone.utc).strftime("%Y-%m-%d"),
-            }
-            for event in self.webserver.engine.calendar.get_events(start, end)
-        ]
+        return dumps([])
 
-        for event in events:
-            if event["url"] is None or event["url"] == "":
-                del event["url"]
+    def removed_calendar_download(self):
+        response.content_type = "text/calendar"
+        return ""
 
-        return dumps(events)
+    def removed_detail(self, **kwargs):
+        raise HTTPError(status=404, body="This item does not exist. The feature is removed.")
 
-    def calendar_add(self):
-        event = self.webserver.engine.calendar.create_event(
-            None,
-            request.json["summary"],
-            request.json["description"],
-            request.json.get("location"),
-            datetime.fromtimestamp(int(request.json["dtstart"])).replace(tzinfo=timezone.utc),
-            (
-                None
-                if request.json["dtend"] is None
-                else datetime.fromtimestamp(int(request.json["dtend"])).replace(tzinfo=timezone.utc)
-            ),
-            request.json.get("freq"),
-            request.json.get("interval"),
-            request.json.get("repeatend"),
-        )
-
-        return self.calendar_detail(event["uid"])
-
-    def calendar_download(self):
-        icalfile = self.webserver.engine.calendar.get_file().relative_to(Path(__file__).parent)
-        return static_file(icalfile.name, root=icalfile.parent, download=icalfile.name)
-
-    # End Calendar
-
-    def display_hardware(self):
-        return {"data": terrariumDisplay.available_displays}
+    def removed_write(self, **kwargs):
+        raise HTTPError(status=410, body="This feature is removed.")
 
     # Enclosure
     @orm.db_session(sql_debug=DEBUG, show_values=DEBUG)
@@ -1324,68 +950,6 @@ class terrariumAPI(object):
             return self.notification_service_detail(service.id)
         except Exception as ex:
             raise HTTPError(status=500, body=f"Notification service could not be added. {ex}")
-
-    # Playlist
-    @orm.db_session(sql_debug=DEBUG, show_values=DEBUG)
-    def playlist_list(self):
-        return {
-            "data": [
-                self.playlist_detail(playlist.id)
-                for playlist in Playlist.select(lambda p: not p.id in self.webserver.engine.settings["exclude_ids"])
-            ]
-        }
-
-    @orm.db_session(sql_debug=DEBUG, show_values=DEBUG)
-    def playlist_detail(self, playlist):
-        try:
-            playlist = Playlist[playlist]
-            playlist_data = playlist.to_dict(with_collections=True)
-            playlist_data["length"] = playlist.length
-            playlist_data["duration"] = playlist.duration
-
-            return playlist_data
-        except orm.core.ObjectNotFound:
-            raise HTTPError(status=404, body=f"Playlist with id {playlist} does not exists.")
-        except Exception as ex:
-            raise HTTPError(status=500, body=f"Error getting playlist {playlist} detail. {ex}")
-
-    @orm.db_session(sql_debug=DEBUG, show_values=DEBUG)
-    def playlist_add(self):
-        try:
-            request.json["files"] = Audiofile.select(lambda af: af.id in request.json["files"])
-            playlist = Playlist(**request.json)
-
-            return self.playlist_detail(playlist.id)
-        except orm.core.ObjectNotFound:
-            raise HTTPError(status=404, body=f'Enclosure with id {request.json["enclosure"]} does not exists.')
-        except Exception as ex:
-            raise HTTPError(status=500, body=f"Playlist could not be added. {ex}")
-
-    @orm.db_session(sql_debug=DEBUG, show_values=DEBUG)
-    def playlist_update(self, playlist):
-        try:
-            playlist = Playlist[playlist]
-            request.json["files"] = Audiofile.select(lambda af: af.id in request.json["files"])
-            playlist.set(**request.json)
-            orm.commit()
-            return self.playlist_detail(playlist.id)
-        except orm.core.ObjectNotFound:
-            raise HTTPError(status=404, body=f"Playlist with id {playlist} does not exists.")
-        except Exception as ex:
-            raise HTTPError(status=500, body=f"Error updating playlist {playlist}. {ex}")
-
-    @orm.db_session(sql_debug=DEBUG, show_values=DEBUG)
-    def playlist_delete(self, playlist):
-        try:
-            message = f"Playlist {Playlist[playlist]} is deleted."
-            Playlist[playlist].delete()
-            orm.commit()
-
-            return {"message": message}
-        except orm.core.ObjectNotFound:
-            raise HTTPError(status=404, body=f"Playlist with id {playlist} does not exists.")
-        except Exception as ex:
-            raise HTTPError(status=500, body=f"Error deleting playlist {playlist}. {ex}")
 
     # Reboot/start API
     def server_action(self, action):

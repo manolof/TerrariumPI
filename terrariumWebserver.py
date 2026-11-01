@@ -493,8 +493,6 @@ class terrariumWebsocket(object):
                         logger.debug(f"Starting authenticated socket? {connection['authenticated']}")
 
                         threading.Thread(target=listen_for_messages, args=(connection,)).start()
-                        for door in self.webserver.engine.load_doors():
-                            self.send_message({"type": "button", "data": door}, connection)
                     else:
                         self.clients[self.clients.index(connection)]["authenticated"] = authenticated
 

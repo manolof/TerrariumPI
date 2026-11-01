@@ -34,11 +34,8 @@ from threading import Thread, Timer
 from base64 import b64encode
 from pathlib import Path
 
-from terrariumDatabase import NotificationMessage, NotificationService, Sensor, Relay, Button
+from terrariumDatabase import NotificationMessage, NotificationService, Sensor, Relay
 from terrariumUtils import terrariumUtils, terrariumSingleton, classproperty, terrariumAsync
-
-# Display support
-from hardware.display import terrariumDisplay, terrariumDisplayLoadingException
 
 
 # https://docs.python.org/3/library/gettext.html#deferred-translations
@@ -272,9 +269,10 @@ class terrariumNotification(terrariumSingleton):
                         self.services[service["id"]] = terrariumNotificationService(
                             service["id"], service["type"], service["name"], service["enabled"], setup
                         )
-                    except terrariumDisplayLoadingException as ex:
+                    except terrariumNotificationServiceException as ex:
+                        # For example a display service, as displays are removed
                         self.services[service["id"]] = None
-                        logger.error(f'Error loading display {service["name"]}: {ex}')
+                        logger.error(f'Error loading service {service["name"]}: {ex}')
 
     def reload_service(self, service_id, new_setup) -> None:
         if service_id not in self.services:
@@ -428,7 +426,6 @@ class terrariumNotificationServiceException(TypeError):
 
 class terrariumNotificationService(object):
     __TYPES = {
-        "display": {"name": _("Display"), "class": lambda: terrariumNotificationServiceDisplay},
         "email": {"name": _("Email"), "class": lambda: terrariumNotificationServiceEmail},
         "telegram": {"name": _("Telegram"), "class": lambda: terrariumNotificationServiceTelegram},
         "traffic": {"name": _("Traffic light"), "class": lambda: terrariumNotificationServiceTrafficLight},
@@ -494,42 +491,6 @@ class terrariumNotificationService(object):
 
     def stop(self) -> None:
         pass
-
-
-class terrariumNotificationServiceDisplay(terrariumNotificationService):
-    def load_setup(self, setup_data) -> None:
-        super().load_setup(setup_data)
-
-        # Now load the actual display device
-        self.setup["device"] = terrariumDisplay(
-            None,
-            setup_data["hardware"],
-            setup_data["address"],
-            (
-                None
-                if not terrariumUtils.is_true(setup_data["show_title"])
-                else f'{setup_data["terrariumpi_name"]} {self.setup["version"]}'
-            ),
-            setup_data.get("h_scroll", False),
-        )
-
-    #        self.show_picture(setup_data["profile_image"])
-
-    def send_message(self, msg_type, subject: str, message, data=None, attachments=[]) -> None:
-        self.setup["device"].message(message)
-
-    def show_picture(self, picture) -> None:
-        try:
-            self.setup["device"].write_image(picture)
-        except Exception:
-            pass
-
-    def stop(self) -> None:
-        try:
-            self.setup["device"].stop()
-            self.setup["device"] = None
-        except Exception as ex:
-            logger.error(f"Error stopping display: {ex}")
 
 
 class terrariumNotificationServiceEmail(terrariumNotificationService):
@@ -2559,27 +2520,6 @@ class terrariumNotificationServiceTelegram(terrariumNotificationService):
 
             await query_message.edit_text("\n".join(message))
 
-    async def button(self, update, context) -> None:
-        if await self._authenticate(update.message):
-            query_message = await update.message.reply_text("Loading button(s)...")
-            button_ids = None
-            try:
-                button_ids = update.message.text.strip().split(" ")[1]
-            except:
-                logger.debug("No button ID given, will return all buttons.")
-
-            button_ids = (
-                [button_ids] if button_ids and button_ids in self.engine.buttons else self.engine.buttons.keys()
-            )
-
-            message = ["Current button(s) status:"]
-            with orm.db_session():
-                for button in Button.select(lambda r: r.id in button_ids).order_by(Button.name):
-                    # TODO: Change message based on button type. Movement, and light
-                    message.append(f"- button {button.name} is {'Close' if bool(button.value) else 'Open'}")
-
-            await query_message.edit_text("\n".join(message))
-
     async def status(self, update, context) -> None:
         if await self._authenticate(update.message):
             query_message = await update.message.reply_text("Loading...")
@@ -2682,7 +2622,6 @@ class terrariumNotificationServiceTelegram(terrariumNotificationService):
 /webcam [webcam_id] : will show the latest image of the webcam ID.
 /sensor [sensor_id] : will show the current sensor state. Sensor id is optional.
 /relay [relay_id] : will show the current relay state. Relay id is optional.
-/button [button_id] : will show the current button state. button id is optional.
 /enclosure [enclosure_id] : will show the current area state of the enclosure ID
 /status : will show the current system status.""")
 
@@ -2755,7 +2694,6 @@ class terrariumNotificationServiceTelegram(terrariumNotificationService):
             self.telegram_bot.add_handler(CommandHandler("help", self.help))
             self.telegram_bot.add_handler(CommandHandler("sensor", self.sensor))
             self.telegram_bot.add_handler(CommandHandler("relay", self.relay))
-            self.telegram_bot.add_handler(CommandHandler("button", self.button))
             self.telegram_bot.add_handler(CommandHandler("status", self.status))
 
             # add handlers for select options

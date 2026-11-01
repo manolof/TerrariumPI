@@ -16,8 +16,7 @@ import threading
 from simple_pid import PID
 
 from pony import orm
-from terrariumAudio import terrariumAudioPlayer
-from terrariumDatabase import Sensor, Playlist, Relay, Button, Area
+from terrariumDatabase import Sensor, Relay, Area
 from terrariumUtils import terrariumCache, terrariumUtils, classproperty
 
 
@@ -32,27 +31,12 @@ class terrariumArea(object):
     __TYPES = {
         "lights": {"name": _("Lighting"), "sensors": [], "class": lambda: terrariumAreaLights},
         "heating": {"name": _("Heating"), "sensors": ["temperature"], "class": lambda: terrariumAreaHeater},
-        "cooling": {"name": _("Cooling"), "sensors": ["temperature"], "class": lambda: terrariumAreaCooler},
         "humidity": {
             "name": _("Humidity"),
             "sensors": ["humidity", "moisture"],
             "class": lambda: terrariumAreaHumidity,
         },
         "watertank": {"name": _("Water tank"), "sensors": ["distance"], "class": lambda: terrariumAreaWatertank},
-        "audio": {"name": _("Audio"), "sensors": [], "class": lambda: terrariumAreaAudio},
-        "co2": {"name": _("CO2"), "sensors": ["co2"], "class": lambda: terrariumAreaCO2},
-        "conductivity": {
-            "name": _("Conductivity"),
-            "sensors": ["conductivity"],
-            "class": lambda: terrariumAreaConductivity,
-        },
-        "fertility": {"name": _("Fertility"), "sensors": ["fertility"], "class": lambda: terrariumAreaFertility},
-        "moisture": {
-            "name": _("Moisture"),
-            "sensors": ["moisture", "humidity"],
-            "class": lambda: terrariumAreaMoisture,
-        },
-        "ph": {"name": _("pH"), "sensors": ["ph"], "class": lambda: terrariumAreaPH},
     }
 
     PERIODS = ["low", "high"]
@@ -1259,12 +1243,8 @@ class terrariumAreaLights(terrariumArea):
             logger.debug(f"Area {self} has no light sensors. Ignore light test.")
             return None
 
-        values = {"current": [], "threshold": [], "buttons": []}
-        devices = (
-            Sensor.select(lambda s: s.id in self.setup["light_sensors"])[:]
-            + Button.select(lambda b: b.id in self.setup["light_sensors"])[:]
-        )
-        for sensor in devices:
+        values = {"current": [], "threshold": []}
+        for sensor in Sensor.select(lambda s: s.id in self.setup["light_sensors"])[:]:
             # Sensor needs to be operating correctly
             if (
                 sensor.id in self.enclosure.sensors
@@ -1274,35 +1254,16 @@ class terrariumAreaLights(terrariumArea):
                 values["current"].append(sensor.value)
                 values["threshold"].append(sensor.calibration["light_on_off_threshold"])
 
-            elif sensor.id in self.enclosure.buttons and sensor.error is False:
-                values["buttons"].append(sensor.value)
-
-        if len(values["current"]) == 0 and len(values["buttons"]) == 0:
-            # No valid sensors or buttons, so ignore this test and return None
+        if len(values["current"]) == 0:
+            # No valid sensors, so ignore this test and return None
             logger.debug(f"Area {self} has no valid light sensors. Ignore light test.")
             return None
 
         # Calculate averages
-        if len(values["current"]) > 0:
-            values["current"] = statistics.mean(values["current"])
-            values["threshold"] = statistics.mean(values["threshold"])
-        else:
-            del values["current"]
-            del values["threshold"]
+        values["current"] = statistics.mean(values["current"])
+        values["threshold"] = statistics.mean(values["threshold"])
 
-        if len(values["buttons"]) > 0:
-            amount_buttons = len(values["buttons"])
-            values["buttons"] = [1 for value in values["buttons"] if value]
-            values["buttons"] = len(values["buttons"]) >= amount_buttons / 2.0
-        else:
-            del values["buttons"]
-
-        if "buttons" not in values:
-            return values["current"] >= values["threshold"]
-        elif "current" not in values:
-            return values["buttons"]
-        else:
-            return values["current"] >= values["threshold"] and values["buttons"]
+        return values["current"] >= values["threshold"]
 
 
 class terrariumAreaHeater(terrariumArea):
@@ -1414,31 +1375,7 @@ class terrariumAreaHeater(terrariumArea):
                     del self.__dimmers[f"{relay.id}"]
 
 
-class terrariumAreaCooler(terrariumAreaHeater):
-    pass
-
-
 class terrariumAreaHumidity(terrariumAreaHeater):
-    pass
-
-
-class terrariumAreaMoisture(terrariumAreaHeater):
-    pass
-
-
-class terrariumAreaCO2(terrariumAreaHeater):
-    pass
-
-
-class terrariumAreaConductivity(terrariumAreaHeater):
-    pass
-
-
-class terrariumAreaFertility(terrariumAreaHeater):
-    pass
-
-
-class terrariumAreaPH(terrariumAreaHeater):
     pass
 
 
@@ -1481,74 +1418,3 @@ class terrariumAreaWatertank(terrariumArea):
         )
 
         return sensor_values
-
-
-class terrariumAreaAudio(terrariumArea):
-    PERIODS = ["day", "night"]
-
-    def load_setup(self, data) -> None:
-        data = copy.deepcopy(data)
-
-        # Rename the playlists variables back to relays so the rest of the code will work...
-        data["day"]["relays"] = copy.copy(data["day"]["playlists"])
-        data["night"]["relays"] = copy.copy(data["night"]["playlists"])
-
-        del data["day"]["playlists"]
-        del data["night"]["playlists"]
-
-        super().load_setup(data)
-
-        for period in self.PERIODS:
-            if period not in self.setup:
-                continue
-
-            playlists = [playlist for playlist in self.setup[period]["relays"]]
-            with orm.db_session():
-                playlists = [
-                    playlist.to_dict(with_collections=True, related_objects=True)
-                    for playlist in Playlist.select(lambda pl: pl.id in playlists)
-                ]
-                for playlist in playlists:
-                    playlist["files"] = [
-                        audiofile.to_dict(only="filename")["filename"] for audiofile in playlist["files"]
-                    ]
-
-            self.setup[period]["player"] = terrariumAudioPlayer(self.setup["soundcard"], playlists)
-
-    def relays_state(self, period, state: bool = True):
-        # We do not check if the player is actual running. This will cause an unwanted repeat functionality
-        return period in self.state and self.state[period].get("powered", False)
-
-    def relays_toggle(self, period, on) -> bool:
-        if period not in self.setup:
-            return False
-
-        if self.state[period]["powered"] != on:
-            logger.info(f'Toggle the player for area {self} period {period} to state {("on" if on else "off")}.')
-
-        if on:
-            # As we can only have one player running, we have to make sure that there is not a player still running from the other period
-            other_period = copy.copy(self.PERIODS)
-            other_period.remove(period)
-            other_period = other_period[0]
-
-            if other_period in self.setup and self.state[other_period]["powered"]:
-                logger.info(f"Forcing to stop the player for area {self} period {other_period} due to period change.")
-                self.setup[other_period]["player"].stop()
-                self.state[other_period]["powered"] = False
-
-            self.setup[period]["player"].play()
-
-        else:
-            self.setup[period]["player"].stop()
-
-        self.state[period]["powered"] = on
-        self.state["powered"] = self._powered
-
-    def stop(self) -> None:
-        for period in self.PERIODS:
-            if period not in self.setup:
-                continue
-
-            self.setup[period]["player"].stop()
-            self.state[period]["powered"] = False

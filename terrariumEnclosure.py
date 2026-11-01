@@ -3,7 +3,7 @@ import terrariumLogging
 
 logger = terrariumLogging.logging.getLogger(__name__)
 
-from terrariumArea import terrariumArea
+from terrariumArea import terrariumArea, terrariumAreaException
 from terrariumUtils import terrariumUtils
 
 import copy
@@ -35,19 +35,11 @@ class terrariumEnclosure(object):
     def sensors(self):
         return self.engine.sensors
 
-    @property
-    def buttons(self):
-        return self.engine.buttons
-
     def __repr__(self) -> str:
         return f"Enclosure {self.name} with {len(self.areas)} areas"
 
     def __door_status(self) -> bool:
-        # By default, when zero doors are configured, we have to assume the doors are CLOSED
-        for door in self.doors:
-            if self.engine.buttons[door].is_open:
-                return False
-
+        # Doors came from buttons, and buttons are removed. Without a door sensor the door is CLOSED
         return True
 
     def __light_status(self):
@@ -62,7 +54,11 @@ class terrariumEnclosure(object):
             area_setup = copy.deepcopy(area.setup)
             area_setup["is_day"] = area.state.get("is_day", None)
 
-            self.add(terrariumArea(area.id, self, area.type, area.name, area.mode, area_setup))
+            try:
+                self.add(terrariumArea(area.id, self, area.type, area.name, area.mode, area_setup))
+            except terrariumAreaException as ex:
+                # An area of a removed type stays in the database, but is not loaded
+                logger.warning(f"Skipping area {area.name} ({area.id}): {ex}")
 
     @property
     def main_lights(self):
