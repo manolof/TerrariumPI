@@ -156,6 +156,10 @@ class terrariumArea(object):
                     if period not in self.setup:
                         continue
 
+                    if "timetable" not in main_lights.setup["day" if "low" == period else "night"]:
+                        logger.warning(f"The main lights have no timetable yet, so {self} has none either.")
+                        continue
+
                     self.setup[period]["timetable"] = copy.deepcopy(
                         main_lights.setup["day" if "low" == period else "night"]["timetable"]
                     )
@@ -169,6 +173,12 @@ class terrariumArea(object):
             return True
 
         if "weather" == self.mode or "weather_inverse" == self.mode:
+            if self.enclosure.weather is None:
+                # No weather source, or it could not be loaded at start-up. There are no sun times to plan from,
+                # and none are made up: the timetable and the lights stay as they are.
+                logger.error(f"No weather data for {self}, so no timetable can be made. The lights are left as they are.")
+                return False
+
             sunrise = (
                 self.enclosure.weather.sunrise
                 if "weather" == self.mode
@@ -383,6 +393,8 @@ class terrariumArea(object):
             "lights" == light_mode
             and self.enclosure.main_lights is not None
             and self.enclosure.main_lights.mode != "disabled"
+            and "begin" in self.enclosure.main_lights.state.get("day", {})
+            and "end" in self.enclosure.main_lights.state.get("day", {})
         ):
             is_day_time = (
                 self.enclosure.main_lights.state["day"]["begin"]
@@ -438,6 +450,12 @@ class terrariumArea(object):
 
             # A high period is reported, but no longer switched
             if read_only or "high" == period:
+                self.state[period]["powered"] = self.relays_state(period)
+                continue
+
+            if self.mode in WEATHER_MODES and self.enclosure.weather is None:
+                # No weather data: leave the relays as they are, and say so
+                logger.warning(f"No weather data for {self}: its relays are left as they are.")
                 self.state[period]["powered"] = self.relays_state(period)
                 continue
 
