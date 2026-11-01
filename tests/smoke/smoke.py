@@ -190,6 +190,10 @@ def main():
                 "-p", f"127.0.0.1:{PORT}:{PORT}",
                 "-v", f"{volume}:/TerrariumPI/data",
                 "-e", "AUTO_REBOOT=false",
+                # run.sh edits /etc/modules and the boot config, and asks for a reboot. Not here.
+                # (In run.sh, ENABLE_CAMERA, ENABLE_SERIAL and ENABLE_CO2_SENSORS all read ENABLE_1_WIRE.)
+                "-e", "ENABLE_I2C=false",
+                "-e", "ENABLE_1_WIRE=false",
                 "-v", f"{Path(__file__).resolve().parent}:/smoke:ro",
                 args.image, "/opt/venv/bin/python", "/smoke/launch.py",
             ]
