@@ -31,7 +31,6 @@ STUBBED_MODULES = [
     "pyfancy",
     "pyfancy.pyfancy",
     "func_timeout",
-    "simple_pid",
     "yoyo",
     "dotenv",
     "requests",

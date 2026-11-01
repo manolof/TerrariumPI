@@ -1,0 +1,439 @@
+"""Area settings: the live setups keep working, and removed settings are stored but ignored."""
+import copy
+import datetime
+import json
+from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
+
+import pytest
+from pony import orm
+
+import terrariumArea
+import terrariumEnclosure
+from terrariumDatabase import Relay, Sensor
+
+LIVE_AREAS = {
+    area["name"]: area
+    for area in json.loads((Path(__file__).parent / "fixtures" / "areas.json").read_text(encoding="utf-8"))["data"]
+}
+
+HEAT = "91ed608a8a715c1e0c3c362aacac50e0"
+MIST = "f403bea98501a5ee72f7767a41be13f1"
+MAIN_LIGHT = "54dfe1075cfe1151092974a2854e45a6"
+DIMMER = "64ad13e5d5924922118609ec179423f2"
+TEMPERATURE = "721ce353dd0e129fbd1e2e5130c3a0a3"
+HUMIDITY = "86e2d40cd6d6b99a6c178d04c7a70d1a"
+
+AREA_CLASSES = {
+    "lights": terrariumArea.terrariumAreaLights,
+    "heating": terrariumArea.terrariumAreaHeater,
+    "humidity": terrariumArea.terrariumAreaHumidity,
+    "watertank": terrariumArea.terrariumAreaWatertank,
+}
+
+
+def _is_float(value):
+    # terrariumUtils is a MagicMock in tests: give the area the real behaviour
+    try:
+        float(value)
+        return True
+    except (TypeError, ValueError):
+        return False
+
+
+class FakeRelay:
+    ON = 100
+    OFF = 0
+
+    def __init__(self, relay_id, name, is_dimmer=False):
+        self.id = relay_id
+        self.name = name
+        self.is_dimmer = is_dimmer
+        self.state = self.OFF
+        self.calls = []
+
+    def is_on(self):
+        return self.state == self.ON
+
+    def is_off(self):
+        return self.state == self.OFF
+
+    def on(self, value, **kwargs):
+        self.calls.append((value, kwargs))
+        self.state = value
+        return True
+
+
+@pytest.fixture(autouse=True)
+def real_utils():
+    with mock.patch.object(terrariumArea.terrariumUtils, "is_float", _is_float):
+        yield
+
+
+@pytest.fixture(autouse=True)
+def timer():
+    # A run time starts a real timer otherwise, and the test run would wait for it
+    with mock.patch.object(terrariumArea.threading, "Timer") as timer:
+        yield timer
+
+
+def load(enclosure, data, setup=None):
+    # Same state load_setup seeds on first load. Its own seed asks for the 1970 timestamp, which Windows refuses.
+    area = object.__new__(AREA_CLASSES[data["type"]])
+    area.id = data["id"]
+    area.type = data["type"]
+    area.name = data["name"]
+    area.mode = data["mode"]
+    area.enclosure = enclosure
+    area.state = {"is_day": True, "last_update": 0, "powered": None}
+    area.load_setup(data["setup"] if setup is None else setup)
+    return enclosure.add(area)
+
+
+def weather():
+    now = datetime.datetime.now()
+    sunrise = now - datetime.timedelta(hours=2)
+    sunset = now + datetime.timedelta(hours=2)
+    day = datetime.timedelta(hours=24)
+    return SimpleNamespace(
+        is_day=True, sunrise=sunrise, sunset=sunset, next_sunrise=sunrise + day, next_sunset=sunset + day
+    )
+
+
+def reading(sensor_id, value):
+    # The newest row of the minute is an average, so replace it to get exactly this value
+    with orm.db_session():
+        Sensor[sensor_id].history.select().delete(bulk=True)
+        Sensor[sensor_id].update(value)
+
+
+@pytest.fixture
+def home(sensor_db):
+    """The live enclosure: four areas from the fixture, on fake relays and real database rows."""
+    relays = {
+        HEAT: FakeRelay(HEAT, "Heat"),
+        MIST: FakeRelay(MIST, "Sprinklers"),
+        MAIN_LIGHT: FakeRelay(MAIN_LIGHT, "Main light"),
+        DIMMER: FakeRelay(DIMMER, "Dimmer", is_dimmer=True),
+    }
+    with orm.db_session():
+        for relay in relays.values():
+            Relay(id=relay.id, hardware="test", name=relay.name, address="1")
+
+        limits = {"hardware": "test", "address": "1"}
+        Sensor(id=TEMPERATURE, type="temperature", name="t", alarm_min=22.0, alarm_max=28.0, **limits)
+        Sensor(id=HUMIDITY, type="humidity", name="h", alarm_min=65.0, alarm_max=90.0, **limits)
+
+    engine = SimpleNamespace(
+        relays=relays,
+        sensors={},
+        weather=weather(),
+        units={"temperature": "C", "humidity": "%"},
+        notification=mock.MagicMock(),
+    )
+    enclosure = terrariumEnclosure.terrariumEnclosure("e1", "Home", engine)
+    # Lights first, as terrariumEnclosure.load_areas does
+    for name in ("Light", "Sunrise - Sunset", "Heat", "Sprinklers"):
+        load(enclosure, LIVE_AREAS[name])
+
+    return SimpleNamespace(
+        engine=engine,
+        enclosure=enclosure,
+        relays=relays,
+        areas={area.name: area for area in enclosure.areas.values()},
+    )
+
+
+def state_keys(state):
+    return {key: sorted(value) if isinstance(value, dict) else None for key, value in state.items()}
+
+
+# --- the live setups ---
+def test_the_four_live_areas_load_unchanged_from_fixtures(home):
+    assert sorted(home.areas) == sorted(LIVE_AREAS)
+    for name, area in home.areas.items():
+        assert isinstance(area, AREA_CLASSES[LIVE_AREAS[name]["type"]])
+
+    heat = home.areas["Heat"].setup
+    assert (heat["low"]["power_on_time"], heat["low"]["settle_time"], heat["day_night_difference"]) == (1500, 300, -2)
+    assert home.areas["Heat"].ignore_high_alarm is False
+    assert home.areas["Heat"].ignore_low_alarm is False
+
+    mist = home.areas["Sprinklers"].setup
+    assert (mist["low"]["power_on_time"], mist["low"]["settle_time"], mist["day_night_difference"]) == (25, 10775, 5)
+    assert home.areas["Sprinklers"].ignore_high_alarm is True
+    assert home.areas["Sprinklers"].ignore_low_alarm is False
+
+    assert home.enclosure.main_lights is home.areas["Light"]
+    light = home.areas["Light"].setup
+    assert (light["min_day_hours"], light["max_day_hours"]) == (10.5, 15)
+    assert light["day"]["tweaks"][MAIN_LIGHT]["on"] == {"delay": 3600.0, "duration": 0}
+    tweaks = home.areas["Sunrise - Sunset"].setup["day"]["tweaks"][DIMMER]
+    assert tweaks == {"on": {"delay": 0.0, "duration": 1800.0}, "off": {"delay": 0.0, "duration": 5400.0}}
+
+
+def test_removed_settings_leave_nothing_on_the_area(home):
+    for area in home.areas.values():
+        for name in ("depends_on", "low_deviation", "high_deviation", "depending_relays_ok", "light_sensors_on"):
+            assert not hasattr(area, name)
+
+
+def test_the_state_the_api_reports_keeps_its_keys(home):
+    reading(TEMPERATURE, 21.0)
+    reading(HUMIDITY, 77.0)
+    # timer_on appears with the first switch off, and the live areas have had theirs
+    for area in home.areas.values():
+        area.relays_toggle("day" if area.type == "lights" else "low", False)
+
+    home.enclosure.update()
+
+    for name, area in home.areas.items():
+        assert state_keys(area.state) == state_keys(LIVE_AREAS[name]["state"]), name
+
+
+def test_an_area_is_still_built_as_its_own_type(home):
+    with mock.patch.object(terrariumArea.terrariumArea, "load_setup"):
+        area = terrariumArea.terrariumArea("a1", home.enclosure, "heating", "Heat", "sensors", {})
+    assert type(area) is terrariumArea.terrariumAreaHeater
+
+
+def test_the_enclosure_updates_every_area_with_the_main_light_first(home):
+    order = []
+    for area in home.areas.values():
+        area.update = lambda read_only, name=area.name: order.append(name) or {}
+    home.areas["Heat"].setup["depends_on"] = [home.areas["Sprinklers"].id]
+
+    states = home.enclosure.update()
+
+    assert order[0] == "Light"
+    assert sorted(order) == sorted(LIVE_AREAS)
+    assert len(states) == 4
+
+
+# --- old setups ---
+REMOVED_SETTINGS = {
+    "depends_on": lambda s: s.update(depends_on=["other"]),
+    "light_status": lambda s: s["low"].update(light_status="on"),
+    "door_status": lambda s: s["low"].update(door_status="open"),
+    "depend_on_relays": lambda s: s["low"].update(depend_on_relays=[MIST], depend_on_relays_mode="all"),
+    "deviation": lambda s: s.update(deviation_low_alarm=-5),
+    "alarm_threshold": lambda s: s["low"].update(alarm_threshold=3),
+    "trigger_threshold": lambda s: s["low"].update(trigger_threshold=3),
+}
+
+
+@pytest.mark.parametrize("setting", REMOVED_SETTINGS)
+def test_an_old_setup_with_removed_fields_loads_and_runs(home, setting):
+    # Each of these held Heat back in the old code. The main light is off and the door closed.
+    home.enclosure.areas["other"] = SimpleNamespace(
+        state={"sensors": {"alarm": True, "current": 1.0, "unit": "temperature"}}, name="Other", setup={}
+    )
+    setup = copy.deepcopy(LIVE_AREAS["Heat"]["setup"])
+    REMOVED_SETTINGS[setting](setup)
+    stored = copy.deepcopy(setup)
+    home.areas["Heat"].load_setup(setup)
+    reading(TEMPERATURE, 21.0)
+
+    home.areas["Heat"].update()
+
+    assert home.relays[HEAT].is_on()
+    assert home.areas["Heat"].state["sensors"]["alarm_min"] == 22
+    # Old fields are not migrated: what was passed in stays as it was
+    assert setup == stored
+
+
+def test_light_sensors_are_ignored(home):
+    with orm.db_session():
+        Sensor(
+            id="lux",
+            hardware="test",
+            type="light",
+            name="l",
+            address="1",
+            calibration={"light_on_off_threshold": 1000},
+        )
+    reading("lux", 1.0)
+    home.engine.sensors["lux"] = object()
+    home.relays[MAIN_LIGHT].state = FakeRelay.ON
+    setup = copy.deepcopy(LIVE_AREAS["Light"]["setup"])
+    setup["light_sensors"] = ["lux"]
+    home.areas["Light"].load_setup(setup)
+    home.areas["Light"].state["day"]["powered"] = True
+
+    home.areas["Light"].update()
+
+    home.engine.notification.message.assert_not_called()
+
+
+def test_a_relay_in_the_high_period_is_reported_but_not_switched(home):
+    setup = copy.deepcopy(LIVE_AREAS["Heat"]["setup"])
+    setup["high"]["relays"] = [MIST]
+    home.areas["Heat"].load_setup(setup)
+    reading(TEMPERATURE, 30.0)
+
+    home.areas["Heat"].update()
+
+    assert home.relays[MIST].calls == []
+    assert home.areas["Heat"].state["sensors"]["alarm_high"] is True
+    assert home.areas["Heat"].state["high"]["powered"] is False
+
+
+def test_a_dimmer_in_a_heater_area_acts_as_plain_on_and_off(home):
+    home.relays[HEAT].is_dimmer = True
+    reading(TEMPERATURE, 21.0)
+
+    home.areas["Heat"].update()
+    assert home.relays[HEAT].calls == [(100, {})]
+
+    home.areas["Heat"].relays_toggle("low", False)
+    assert home.relays[HEAT].calls[-1] == (0, {})
+
+
+# --- Heat ---
+@pytest.mark.parametrize(
+    "is_day, value, starts",
+    [(True, 21.9, True), (True, 22.1, False), (False, 19.9, True), (False, 20.1, False)],
+)
+def test_heat_starts_below_the_low_limit_by_day_and_at_night(home, timer, is_day, value, starts):
+    reading(TEMPERATURE, value)
+    with mock.patch.object(terrariumArea.terrariumArea, "is_day", new=is_day):
+        home.areas["Heat"].update()
+
+    assert home.relays[HEAT].is_on() is starts
+    if starts:
+        timer.assert_called_once_with(1500.0, home.areas["Heat"].relays_toggle, ["low", False])
+        assert home.areas["Heat"].state["low"]["timer_on"] is True
+
+
+def test_heat_waits_for_its_settle_time(home):
+    home.areas["Heat"].state["low"]["last_powered_on"] = int(datetime.datetime.now().timestamp()) - 100
+    reading(TEMPERATURE, 21.0)
+
+    home.areas["Heat"].update()
+
+    assert home.relays[HEAT].calls == []
+
+
+def test_a_running_heat_relay_stops_above_the_high_limit(home):
+    home.relays[HEAT].state = FakeRelay.ON
+    home.areas["Heat"].state["low"]["powered"] = True
+    reading(TEMPERATURE, 28.1)
+
+    home.areas["Heat"].update()
+
+    assert home.relays[HEAT].is_off()
+    assert home.areas["Heat"].state["low"]["powered"] is False
+
+
+def test_a_heat_run_on_its_run_time_goes_on_above_the_high_limit_until_the_timer_ends(home):
+    # Existing behaviour, kept: the high limit stops a relay only when no run time is counting
+    reading(TEMPERATURE, 21.0)
+    home.areas["Heat"].update()
+    assert home.relays[HEAT].is_on()
+
+    reading(TEMPERATURE, 35.0)
+    home.areas["Heat"].update()
+    assert home.areas["Heat"].state["sensors"]["alarm_high"] is True
+    assert home.relays[HEAT].is_on()
+
+    home.areas["Heat"].relays_toggle("low", False)
+    assert home.relays[HEAT].is_off()
+
+
+def test_heat_goes_off_when_every_sensor_fails(home):
+    home.relays[HEAT].state = FakeRelay.ON
+    home.areas["Heat"].state["low"]["powered"] = True
+
+    home.areas["Heat"].update()
+
+    assert home.relays[HEAT].is_off()
+
+
+# --- Mist ---
+def test_mist_ignores_the_high_limit_with_ignore_high_on(home):
+    # With ignore_high on, the high alarm counts from the low limit, so mist stops at 65%, not at 90%
+    home.relays[MIST].state = FakeRelay.ON
+    home.areas["Sprinklers"].state["low"]["powered"] = True
+    reading(HUMIDITY, 77.0)
+
+    home.areas["Sprinklers"].update()
+
+    assert home.areas["Sprinklers"].state["sensors"]["alarm_high"] is True
+    assert home.areas["Sprinklers"].state["sensors"]["alarm_low"] is False
+    assert home.relays[MIST].is_off()
+
+
+def test_mist_starts_below_the_low_limit_and_runs_for_its_run_time(home, timer):
+    reading(HUMIDITY, 60.0)
+
+    home.areas["Sprinklers"].update()
+
+    assert home.relays[MIST].is_on()
+    timer.assert_called_once_with(25.0, home.areas["Sprinklers"].relays_toggle, ["low", False])
+
+
+# --- Lights ---
+def test_the_main_light_comes_on_in_its_period_with_its_delay(home):
+    home.areas["Light"].update()
+
+    value, kwargs = home.relays[MAIN_LIGHT].calls[-1]
+    assert value == 100
+    assert 0 <= kwargs["delay"] <= 3600
+    assert home.enclosure.lights_on
+
+
+def test_the_dimmer_follows_its_timetable_with_its_tweaks(home):
+    home.areas["Sunrise - Sunset"].update()
+    assert home.relays[DIMMER].calls[-1] == (100, {"duration": 1800.0, "delay": 0.0})
+
+    now = int(datetime.datetime.now().timestamp())
+    home.areas["Sunrise - Sunset"].setup["day"]["timetable"] = [[now + 100, now + 200]]
+    home.areas["Sunrise - Sunset"].update()
+    assert home.relays[DIMMER].calls[-1] == (0, {"duration": 5400.0, "delay": 0.0})
+
+
+# --- water tank ---
+def test_watertank_volume_from_a_distance_reading(sensor_db):
+    with orm.db_session():
+        Sensor(id="tank", hardware="test", type="distance", name="d", address="1", alarm_min=20.0, alarm_max=80.0)
+    reading("tank", 55.0)
+    data = {
+        "id": "w1",
+        "type": "watertank",
+        "name": "Tank",
+        "mode": "disabled",
+        "setup": {
+            "sensors": ["tank"],
+            "watertank_height": 100,
+            "watertank_offset": 10,
+            "watertank_volume": 180,
+            "low": {"relays": []},
+            "high": {"relays": []},
+        },
+    }
+    area = load(SimpleNamespace(relays={}, add=lambda area: area), data)
+
+    with orm.db_session():
+        values = area.current_value(["tank"])
+
+    assert values == pytest.approx(
+        {"current": 90.0, "alarm_min": 40.0, "alarm_max": 160.0, "alarm": False, "unit": "watertank"}
+    )
+
+
+# --- stored limits ---
+def test_nothing_writes_stored_limits(home):
+    setup = copy.deepcopy(LIVE_AREAS["Heat"]["setup"])
+    setup["variation"] = [
+        {"when": "at", "period": "00:00", "value": "30"},
+        {"when": "at", "period": "23:59", "value": "30"},
+    ]
+    home.areas["Heat"].load_setup(setup)
+    reading(TEMPERATURE, 25.0)
+
+    home.areas["Heat"].update()
+
+    assert "variation" not in home.areas["Heat"].state
+    with orm.db_session():
+        assert (Sensor[TEMPERATURE].alarm_min, Sensor[TEMPERATURE].alarm_max) == (22, 28)

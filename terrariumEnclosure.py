@@ -87,16 +87,14 @@ class terrariumEnclosure(object):
 
         # Construct a list in the order of:
         # - First list is only main lights area, as they can change the power state for heaters and other areas
-        # - Then all the areas that do not have dependencies
-        # - The the rest of the areas that have dependencies on the previous areas
+        # - Then all the other areas
         for area_id in (
             [
                 area_id
                 for area_id, area in self.areas.items()
                 if area.type == "lights" and area.setup.get("main_lights", False)
             ]
-            + [area_id for area_id, area in self.areas.items() if len(area.depends_on) == 0]
-            + [area_id for area_id, area in self.areas.items() if len(area.depends_on) > 0]
+            + list(self.areas)
         ):
             if area_id in area_states:
                 # This area is already processed...

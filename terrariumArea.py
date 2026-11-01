@@ -10,14 +10,9 @@ import time
 import statistics
 import threading
 
-# http://brettbeauregard.com/blog/2011/04/improving-the-beginners-pid-introduction/
-# https://onion.io/2bt-pid-control-python/
-# https://github.com/m-lundberg/simple-pid
-from simple_pid import PID
-
 from pony import orm
-from terrariumDatabase import Sensor, Relay, Area
-from terrariumUtils import terrariumCache, terrariumUtils, classproperty
+from terrariumDatabase import Sensor, Relay
+from terrariumUtils import terrariumUtils, classproperty
 
 
 WEATHER_MODES = ("weather", "weather_inverse")
@@ -63,8 +58,6 @@ class terrariumArea(object):
         self.type = area_type
         self.name = name
         self.mode = mode
-
-        self.depends_on = []
 
         self.enclosure = enclosure
 
@@ -305,7 +298,6 @@ class terrariumArea(object):
                 "powered": None,
             }
 
-        self.depends_on = self.setup.get("depends_on", [])
         self.ignore_low_alarm = False
         self.ignore_high_alarm = False
 
@@ -318,11 +310,6 @@ class terrariumArea(object):
             self.ignore_high_alarm = bool(self.setup["high"]["ignore_high"])
         except Exception:
             self.ignore_high_alarm = False
-
-        self.low_deviation = self.setup.get("deviation_low_alarm", 0.0)
-        self.low_deviation = 0.0 if not terrariumUtils.is_float(self.low_deviation) else float(self.low_deviation)
-        self.high_deviation = self.setup.get("deviation_high_alarm", 0.0)
-        self.high_deviation = 0.0 if not terrariumUtils.is_float(self.high_deviation) else float(self.high_deviation)
 
         float_values = ["max_day_hours", "min_day_hours", "shift_day_hours"]
         for float_value in float_values:
@@ -338,7 +325,7 @@ class terrariumArea(object):
                 continue
 
             # With version 4.6.0 we get also empty string fields back. So we have to make sure that the fields in the list below are all float values
-            float_values = ["on_duration", "off_duration", "settle_time", "power_on_time", "alarm_threshold"]
+            float_values = ["on_duration", "off_duration", "settle_time", "power_on_time"]
             for float_value in float_values:
                 self.setup[period][float_value] = self.setup[period].get(float_value, 0.0)
                 self.setup[period][float_value] = (
@@ -359,113 +346,9 @@ class terrariumArea(object):
         if "sensors" != self.mode:
             self._time_table()
 
-        # Setup variation data
-        if self.setup.get("variation"):
-            self._setup_variation_data()
-
         self.state["powered"] = self._powered
 
         self._apply_night_shift()
-
-    def _setup_variation_data(self) -> None:
-        # Thanks to HTPProXy https://github.com/theyosh/TerrariumPI/issues/1009#issuecomment-2896732294
-        def parse_period_to_time(period_str):
-            """Parst verschiedene Zeit-Eingabeformate zu HH:MM"""
-            if not period_str:
-                return "00:00"
-
-            period_str = str(period_str).strip()
-
-            # 12-Stunden Format: "2:30 PM"
-            if period_str.upper().endswith((" AM", " PM")):
-                time_obj = datetime.datetime.strptime(period_str.upper(), "%I:%M %p")
-                return time_obj.strftime("%H:%M")
-
-            # 24-Stunden Format: "14:30"
-            elif ":" in period_str:
-                time_obj = datetime.datetime.strptime(period_str, "%H:%M")
-                return time_obj.strftime("%H:%M")  # Normalisiert auch die Formatierung
-
-            # Sekunden als String: "3600"
-            else:
-                seconds = int(period_str)
-                seconds = seconds % 86400
-                hours = seconds // 3600
-                minutes = (seconds % 3600) // 60
-                return f"{hours:02d}:{minutes:02d}"
-
-        self.state["variation"] = {
-            "active": len(self.setup["sensors"]) > 0,
-            "dynamic": False,
-            "external": False,
-            "script": False,
-            "weather": False,
-            "offset": float(0),
-            "source": None,
-            "periods": [],
-        }
-
-        variation_data = copy.deepcopy(self.setup.get("variation", []))
-        if len(variation_data) == 0:
-            return
-
-        if variation_data[0]["when"] in ["script", "external", "weather"]:
-            try:
-                self.state["variation"]["offset"] = float(variation_data[0]["offset"])
-            except Exception as ex:
-                # Not a valid float, so use default 0
-                logger.debug(f'Invalid variation offset value {variation_data[0]["offset"]}: {ex}')
-
-            self.state["variation"][variation_data[0]["when"]] = True
-            if "weather" != variation_data[0]["when"]:
-                self.state["variation"]["source"] = variation_data[0]["source"]
-
-            if "external" == variation_data[0]["when"]:
-                self.__external_cache = terrariumCache()
-
-            variation_data = []
-
-        for variation in variation_data:
-            if "" == variation.get("value", ""):
-                continue
-
-            periods = len(self.state["variation"]["periods"])
-
-            if "at" == variation.get("when"):
-                # Format datetime object to a time string
-                period_timestamp = parse_period_to_time(variation.get("period"))
-
-            elif "after" == variation.get("when"):
-                # !! UNTESTED !!
-                if periods == 0:
-                    # We need main lights on starting time....
-                    self.state["variation"]["dynamic"] = True
-
-                else:
-                    # We need the previous period start time and adding the 'after' period duration
-                    period_timestamp = datetime.time.fromisoformat(
-                        self.state["variation"]["periods"][periods - 1]["start"]
-                    )
-                    period_timestamp = datetime.datetime.now().replace(
-                        hour=period_timestamp.hour, minute=period_timestamp.minute
-                    ) + datetime.timeldeta(minute=int(variation.get("period")))
-                    period_timestamp = period_timestamp.strftime("%H:%M")
-
-            if periods > 0:
-                # We have at least 1 item so we need to update the previous entry with the new end time and value
-                self.state["variation"]["periods"][periods - 1]["end"] = period_timestamp
-                self.state["variation"]["periods"][periods - 1]["end_value"] = str(variation.get("value"))
-
-            self.state["variation"]["periods"].append(
-                {
-                    "start": period_timestamp,
-                    "end": "23:59",  # By default, we stop at the end of the day
-                    "start_value": str(variation.get("value")),
-                    "end_value": str(
-                        variation.get("value")
-                    ),  # This will be overwritten by the next value to get a nice change during the period
-                }
-            )
 
     def _is_timer_time(self, period):
         if period not in self.setup or "timetable" not in self.setup[period]:
@@ -486,176 +369,6 @@ class terrariumArea(object):
 
         logger.debug(f"Area {self} does not know if it is time.... Should update new timetable for next day?")
         return None
-
-    def _update_variation(self) -> None:
-        # !! This variation updates will interfere with the 'day/night difference' setting !!
-        if ("variation" not in self.state) or (not self.state["variation"]["active"]):
-            return
-
-        # Get the current time in minutes
-        now = datetime.datetime.now().time()
-        # Loop over the periods to find the current period
-        period = None
-        if self.state["variation"]["script"] or self.state["variation"]["external"]:
-            value = None
-
-            if self.state["variation"]["script"]:
-                value = (
-                    float(terrariumUtils.get_script_data(self.state["variation"]["source"]))
-                    + self.state["variation"]["offset"]
-                )
-
-            elif self.state["variation"]["external"]:
-                # Here we get data from an external source. We cache this data for 10 minutes
-                cache_key = f"{self.id}_external"
-                value = self.__external_cache.get_data(cache_key)
-                if value is None:
-                    start = time.time()
-                    value = (
-                        float(terrariumUtils.get_remote_data(self.state["variation"]["source"]))
-                        + self.state["variation"]["offset"]
-                    )
-                    if value is not None:
-                        unit = self.enclosure.engine.units[self.state["sensors"]["unit"]]
-                        self.__external_cache.set_data(cache_key, value, 10 * 60)
-                        logger.info(
-                            f"Updated external source variation data with value: {value}{unit} in {time.time() - start:.2f} seconds"
-                        )
-                    else:
-                        logger.error("Could not load data from external source! Please check your settings.")
-
-            if value is not None:
-                period = {
-                    "start": (datetime.datetime.now() - datetime.timedelta(minutes=2)).time(),
-                    "end": (
-                        datetime.datetime.now() + datetime.timedelta(minutes=2)
-                    ).time(),  # By default, we stop at the end of the day
-                    "start_value": str(value),
-                    "end_value": str(
-                        value
-                    ),  # This will be overwritten by the next value to get a nice change during the period
-                }
-
-        elif self.state["variation"]["weather"]:
-            weather_current_source = None
-            if self.type in ["heating", "cooling"]:
-                weather_current_source = "temperature"
-            elif self.type in ["humidity"]:
-                weather_current_source = "humidity"
-
-            if weather_current_source is None:
-                return
-
-            current_timestamp = int((datetime.datetime.now() - datetime.timedelta(hours=24)).timestamp())
-            for counter, history in enumerate(self.enclosure.engine.weather.history):
-                if current_timestamp <= history["timestamp"] + time.timezone:
-                    period = {
-                        "start": datetime.datetime.fromtimestamp(
-                            int(self.enclosure.engine.weather.history[counter - 1]["timestamp"] + time.timezone)
-                        ),
-                        "end": datetime.datetime.fromtimestamp(int(history["timestamp"] + time.timezone)),
-                        "start_value": str(self.enclosure.engine.weather.history[counter - 1][weather_current_source]),
-                        "end_value": str(history[weather_current_source]),
-                    }
-                    break
-
-        else:
-            for item in self.state["variation"]["periods"]:
-                if now >= datetime.time.fromisoformat(item["start"]) and now < datetime.time.fromisoformat(item["end"]):
-                    # Fond the right period, so save and stop looping
-                    period = copy.copy(item)
-                    period["start"] = datetime.time.fromisoformat(item["start"])
-                    period["end"] = datetime.time.fromisoformat(item["end"])
-                    break
-
-        if period is None:
-            # No valid period found, so we are done!
-            return
-
-        # Get the current 'wanted' average value based on the alarm min and max values
-        current_average_value = (self.state["sensors"]["alarm_min"] + self.state["sensors"]["alarm_max"]) / 2.0
-
-        # Convert relative sensor values to absolute values based on the current state.
-        # This is done only once when the period starts. Once converted, we keep the absolute values
-        # !! UNTESTED !!
-        if period["start_value"].startswith("+"):
-            period["start_value"] = current_average_value + int(period["start_value"][1:])
-
-        elif period["start_value"].startswith("-"):
-            period["start_value"] = current_average_value - int(period["start_value"][1:])
-
-        if period["end_value"].startswith("+"):
-            period["end_value"] = current_average_value + int(period["end_value"][1:])
-
-        elif period["end_value"].startswith("-"):
-            period["end_value"] = current_average_value + -int(period["end_value"][1:])
-
-        # Start calculation
-        # Get the total duration of the period in seconds
-        period_duration = round(
-            (
-                datetime.datetime.now().replace(hour=period["end"].hour, minute=period["end"].minute)
-                - datetime.datetime.now().replace(hour=period["start"].hour, minute=period["start"].minute)
-            ).total_seconds()
-        )
-        # Get the total difference that needs to change during the period
-        period_difference = float(period["end_value"]) - float(period["start_value"])
-        # How far are we in this period in seconds
-        period_duration_done = round(
-            (
-                datetime.datetime.now().replace(hour=now.hour, minute=now.minute)
-                - datetime.datetime.now().replace(hour=period["start"].hour, minute=period["start"].minute)
-            ).total_seconds()
-        )
-        # Calculate the wanted average based on the start period value and the time elapsed * sensor difference/second
-        wanted_average_value = float(period["start_value"]) + (
-            float(period_duration_done) * float(period_difference / period_duration)
-        )
-        # Get the difference between the actual current average and the wanted average rounded at .1
-        sensor_diff = round(wanted_average_value - current_average_value, 1)
-
-        if sensor_diff != 0.0:
-            # Change every sensor its min max alarm values with `sensor_diff` change
-            with orm.db_session():
-                for sensor in Sensor.select(lambda s: s.id in self.setup["sensors"]):
-                    sensor.alarm_min += sensor_diff
-                    sensor.alarm_max += sensor_diff
-                    unit = self.enclosure.engine.units[self.state["sensors"]["unit"]]
-                    logger.info(
-                        f"Variation change {sensor.type} sensor '{sensor.name}' for area '{self.name}'. New values min: {sensor.active_alarm_min:.2f}{unit}, max:{sensor.active_alarm_max:.2f}{unit}. New average is: {wanted_average_value:.2f}{unit}."
-                    )
-
-        # Reload the current sensor values after changing them
-        self.state["sensors"] = self.current_value(self.setup["sensors"])
-
-    def depending_relays_ok(self, part):
-        depending_relays = self.setup[part].get("depend_on_relays", [])
-
-        if len(depending_relays) == 0:
-            return True
-
-        mode = self.setup[part].get("depend_on_relays_mode", None)
-
-        if mode is None:
-            return False
-
-        relays_status = []
-        for relay in depending_relays:
-            if relay not in self.enclosure.engine.relays:
-                relays_status.append(False)
-            else:
-                relays_status.append(self.enclosure.engine.relays[relay].is_on())
-
-        if mode == "all":
-            return all(relays_status)
-
-        elif mode == "one":
-            return True in relays_status
-
-        elif mode == "none":
-            return not all(relays_status)
-
-        return True
 
     @property
     def is_day(self):
@@ -691,27 +404,13 @@ class terrariumArea(object):
 
         start = time.time()
 
-        light_state = "on" if self.enclosure.lights_on else "off"
-        door_state = "closed" if self.enclosure.door_closed else "open"
-
-        old_is_day = self.state["is_day"]
         self.state["is_day"] = self.is_day
         self._apply_night_shift()
-
-        if "variation" in self.state and self.state["variation"]["dynamic"]:
-            if old_is_day != self.state["is_day"] or int(datetime.datetime.now().strftime("%H%M")) % 400 == 0:
-                # logger.info('Updating variation data based on day/night change or modulo 400')
-                self._setup_variation_data()
 
         if "sensors" in self.setup and len(self.setup["sensors"]) > 0:
             # If there are sensors in use, calculate the current values
             self.state["sensors"] = self.current_value(self.setup["sensors"])
 
-            # If there are variations on the alarm values, update them here
-            if not read_only:
-                self._update_variation()
-
-            # Deviation calculation is done in current_value() function
             if self.ignore_low_alarm:
                 # Use the max alarm value to changing the relays
                 self.state["sensors"]["alarm_low"] = (
@@ -733,59 +432,13 @@ class terrariumArea(object):
                     self.state["sensors"]["current"] > self.state["sensors"]["alarm_max"]
                 )
 
-        # If the depending area is in alarm state, we cannot toggle this area and all the relays should be shutdown
-        depends_on_alarm = False
-        for area in self.depends_on:
-            if area in self.enclosure.areas and self.enclosure.areas[area].state.get("sensors"):
-                depends_on_alarm = depends_on_alarm or self.enclosure.areas[area].state["sensors"]["alarm"]
-                if depends_on_alarm:
-                    unit_value = self.enclosure.engine.units[self.enclosure.areas[area].state["sensors"]["unit"]]
-                    logger.info(
-                        f'Depending area {self.enclosure.areas[area].name} is in alarm state for area {self}. Current: {self.enclosure.areas[area].state["sensors"]["current"]:.2f}{unit_value}'
-                    )
-
-                    for period in self.PERIODS:
-                        if period in self.setup and self.relays_state(period):
-                            logger.info(
-                                f"Toggle down the power for period {period} due to depending area {self.enclosure.areas[area].name} alarm state."
-                            )
-                            self.relays_toggle(period, False)
-
-                    break
-
         for period in self.PERIODS:
             if period not in self.setup:
                 continue
 
-            if read_only:
+            # A high period is reported, but no longer switched
+            if read_only or "high" == period:
                 self.state[period]["powered"] = self.relays_state(period)
-                continue
-
-            # Set the lights state. Default True
-            light_state_ok = True
-            if "light_status" in self.setup[period] and self.setup[period]["light_status"] not in ["ignore", ""]:
-                # Change the lights state based on the current state and requested state. False when not equal
-                light_state_ok = self.setup[period]["light_status"] == light_state
-
-            # Set the doors state. Default True
-            door_state_ok = True
-            if "door_status" in self.setup[period] and self.setup[period]["door_status"] not in ["ignore", ""]:
-                # Change the doors state based on the current state and requested state. False when not equal
-                door_state_ok = self.setup[period]["door_status"] == door_state
-
-            # Set depending relays state
-            depending_relays_ok = self.depending_relays_ok(period)
-
-            # First check: Shutdown power when power is on and either the lights or doors are in wrong state. Despite 'mode'
-            if not self.relays_state(period, False) and not (
-                light_state_ok and door_state_ok and depending_relays_ok and (not depends_on_alarm)
-            ):
-                # Power is on, but either the lights or doors are in wrong state. Power down now.
-                logger.info(
-                    f'Forcing down the {period} power for area {self} because either the lights({"OK" if light_state_ok else "ERROR"}), doors({"OK" if door_state_ok else "ERROR"}) or depending area ({"OK" if not depends_on_alarm else "ERROR"}) are in an invalid state.'
-                )
-                self.relays_toggle(period, False)
-                # And ignore the rest....
                 continue
 
             if "sensors" != self.mode:
@@ -832,30 +485,6 @@ class terrariumArea(object):
                     toggle_relay = False if other_alarm else None
 
             if toggle_relay is True and not self.relays_state(period):
-                if not light_state_ok:
-                    logger.info(
-                        f'Relays for {self} period {period} are not switched on because the lights are {light_state} while {self.setup[period]["light_status"]} is requested.'
-                    )
-                    continue
-
-                if not door_state_ok:
-                    logger.info(
-                        f'Relays for {self} period {period} are not switched on because the door is {door_state} while {self.setup[period]["door_status"]} is requested.'
-                    )
-                    continue
-
-                if not depending_relays_ok:
-                    logger.info(
-                        f"Relays for {self} period {period} are not switched on because the depending relays are not in the correct state."
-                    )
-                    continue
-
-                if depends_on_alarm:
-                    logger.info(
-                        f"Relays for {self} period {period} are not switched on because at least one of the depending areas is in an alarm state."
-                    )
-                    continue
-
                 time_elapsed = abs(int(datetime.datetime.now().timestamp()) - self.state[period]["last_powered_on"])
                 # Extra weather check / backup
                 if self.mode in ["weather", "weather_inverse"] and time_elapsed < (15 * 60):
@@ -885,14 +514,6 @@ class terrariumArea(object):
                         )
                         continue
 
-                if self.state[period]["alarm_count"] < self.setup[period]["alarm_threshold"]:
-                    logger.info(
-                        f'The alarm counter ({self.state[period]["alarm_count"]}) for area {self} for alarm {period} is lower than the threshold ({self.setup[period]["alarm_threshold"]}). Skip this round.'
-                    )
-                    self.state[period]["alarm_count"] += 1
-                    continue
-
-                self.state[period]["alarm_count"] = 0
                 self.relays_toggle(period, True)
 
             elif (
@@ -937,8 +558,6 @@ class terrariumArea(object):
             else:
                 sensor_values[key] = statistics.mean(sensor_values[key])
 
-        sensor_values["alarm_min"] += self.low_deviation
-        sensor_values["alarm_max"] += self.high_deviation
         sensor_values["alarm"] = (
             not sensor_values["alarm_min"] <= sensor_values["current"] <= sensor_values["alarm_max"]
         )
@@ -1071,11 +690,6 @@ class terrariumAreaLights(terrariumArea):
     def load_setup(self, data) -> None:
         super().load_setup(data)
 
-        # Check and load optional light detecting sensors
-        self.setup["light_sensors"] = []
-        if "light_sensors" in data:
-            self.setup["light_sensors"] = data["light_sensors"]
-
         # Load extra tweaks
         for period in self.PERIODS:
             if period not in self.setup:
@@ -1166,111 +780,7 @@ class terrariumAreaLights(terrariumArea):
 
         self.state["powered"] = self._powered
 
-    def update(self, read_only: bool = False):
-        super().update(read_only)
-
-        if read_only or self.mode == "disabled":
-            return self.state
-
-        light_sensor = self.light_sensors_on()
-        if light_sensor is not None and light_sensor != self.state["day"]["powered"]:
-            data = {"current_state": self.state["day"]["powered"], "sensor_state": light_sensor}
-
-            data = {**data, **terrariumUtils.flatten_dict(Area[self.id].to_dict())}
-            # Example data:
-            # {
-            #   "current_state": true,
-            #   "sensor_state": false,
-            #   "id": "6f2ea912-8ac8-4985-a21d-c2f3686bae62",
-            #   "enclosure": "08fba68a-05ff-4ae6-9265-a95c70885c52",
-            #   "name": "Day light",
-            #   "type": "lights",
-            #   "mode": "weather",
-            #   "setup_day_begin": "06:15",
-            #   "setup_day_end": "20:55",
-            #   "setup_day_off_duration": 559.666666666667,
-            #   "setup_day_on_duration": 880.333333333333,
-            #   "setup_day_relays_0": "379856a83bce28484f1d07bd98c3c108",
-            #   "setup_day_relays_1": "a8df016cae5e89a65ba4576d49c676c3",
-            #   "setup_day_tweaks_0_id": "379856a83bce28484f1d07bd98c3c108",
-            #   "setup_day_tweaks_0_off": 20,
-            #   "setup_day_tweaks_0_on": 10,
-            #   "setup_day_tweaks_1_id": "a8df016cae5e89a65ba4576d49c676c3",
-            #   "setup_day_tweaks_1_off": "0,30",
-            #   "setup_day_tweaks_1_on": "23,65",
-            #   "setup_light_sensors_0": "5621daae6bbfb47aed28707b3c3d9dfa",
-            #   "setup_light_sensors_1": "0f39ec8d27d84c7ea6a7149e7453ca68",
-            #   "setup_main_lights": "on",
-            #   "setup_max_day_hours": 0,
-            #   "setup_min_day_hours": 0,
-            #   "setup_night_begin": "20:55",
-            #   "setup_night_end": "06:15",
-            #   "setup_night_off_duration": 880.333333333333,
-            #   "setup_night_on_duration": 559.666666666667,
-            #   "setup_night_relays_0": "34c655ec648d0720ef2e259522e70e22",
-            #   "setup_night_tweaks_0_id": "34c655ec648d0720ef2e259522e70e22",
-            #   "setup_night_tweaks_0_off": 54,
-            #   "setup_night_tweaks_0_on": 19,
-            #   "setup_shift_day_hours": 0,
-            #   "state_day_alarm_count": 0,
-            #   "state_day_begin": 1673592972,
-            #   "state_day_duration": 34804,
-            #   "state_day_end": 1673627776,
-            #   "state_day_last_powered_on": 1673625263,
-            #   "state_day_powered": true,
-            #   "state_is_day": true,
-            #   "state_last_update": 1673625520,
-            #   "state_night_alarm_count": 0,
-            #   "state_night_begin": 1673627776,
-            #   "state_night_duration": 51577,
-            #   "state_night_end": 1673679353,
-            #   "state_night_last_powered_on": -3600,
-            #   "state_night_powered": false,
-            #   "state_night_timer_on": false,
-            #   "state_powered": true
-            # }
-
-            logger.warning(
-                f'Area {self} lights are at incorrect state based on sensors. Current state {"on" if light_sensor else "off"} where it should be {"off" if light_sensor else "on"}'
-            )
-            self.enclosure.engine.notification.message("area_lights_incorrect", data)
-
-        return self.state
-
-    def light_sensors_on(self):
-        if len(self.setup["light_sensors"]) == 0:
-            # No sensors selected, so ignore this test and return None
-            logger.debug(f"Area {self} has no light sensors. Ignore light test.")
-            return None
-
-        values = {"current": [], "threshold": []}
-        for sensor in Sensor.select(lambda s: s.id in self.setup["light_sensors"])[:]:
-            # Sensor needs to be operating correctly
-            if (
-                sensor.id in self.enclosure.sensors
-                and sensor.calibration.get("light_on_off_threshold", False)
-                and sensor.error is False
-            ):
-                values["current"].append(sensor.value)
-                values["threshold"].append(sensor.calibration["light_on_off_threshold"])
-
-        if len(values["current"]) == 0:
-            # No valid sensors, so ignore this test and return None
-            logger.debug(f"Area {self} has no valid light sensors. Ignore light test.")
-            return None
-
-        # Calculate averages
-        values["current"] = statistics.mean(values["current"])
-        values["threshold"] = statistics.mean(values["threshold"])
-
-        return values["current"] >= values["threshold"]
-
-
 class terrariumAreaHeater(terrariumArea):
-    def __init__(self, area_id, enclosure, type, name: str, mode, setup) -> None:
-        self.__dimmers = {}
-        super().__init__(area_id, enclosure, type, name, mode, setup)
-
     @property
     def _powered(self):
         powered = None
@@ -1282,97 +792,16 @@ class terrariumAreaHeater(terrariumArea):
 
         return powered
 
-    def load_setup(self, data) -> None:
-        super().load_setup(data)
-
-        # Restore running dimmers with PID if running in sensor mode
-        if "sensors" == self.mode:
-            for period in self.PERIODS:
-                if period not in self.setup or not self.state[period]["powered"]:
-                    continue
-
-                for relay in self.setup[period]["relays"]:
-                    if relay not in self.enclosure.relays:
-                        continue
-
-                    relay = self.enclosure.relays[relay]
-                    if relay.is_dimmer:
-                        self._relay_action(period, relay, True)
-
-        self.state["powered"] = self._powered
-
-    def update(self, read_only: bool = False):
-        super().update(read_only)
-
-        if not read_only and self.mode != "disabled" and len(self.__dimmers) > 0:
-            sensor_values = self.current_value(self.setup["sensors"])
-            sensor_average = float(sensor_values["alarm_min"] + sensor_values["alarm_max"]) / 2.0
-
-            for period in self.PERIODS:
-                if period not in self.setup:
-                    continue
-
-                for relay in self.setup[period]["relays"]:
-                    relay = self.enclosure.relays[relay]
-                    if relay.id in self.__dimmers:
-                        self.__dimmers[f"{relay.id}"].setpoint = sensor_average
-                        self.__dimmers[f"{relay.id}"].output_limits = (relay.OFF, relay.ON)
-
-                        dimmer_value = round(self.__dimmers[f"{relay.id}"](sensor_values["current"]))
-                        logger.info(
-                            f'Updating {relay} to value {dimmer_value}%. Current: {sensor_values["current"]:.2f}{self.enclosure.engine.units[sensor_values["unit"]]}, target: {sensor_average:.2f}{self.enclosure.engine.units[sensor_values["unit"]]}'
-                        )
-                        self.enclosure.relays[f"{relay.id}"].on(dimmer_value)
-
-        self.state["powered"] = self._powered
-        return self.state
-
     def _relay_action(self, part, relay, action) -> None:
         if relay.id in self.enclosure.relays:
             if action:
-                if relay.id in self.__dimmers:
-                    return
-
-                if relay.is_dimmer and "sensors" == self.mode:
-                    sensor_values = self.current_value(self.setup["sensors"])
-                    sensor_average = float(sensor_values["alarm_min"] + sensor_values["alarm_max"]) / 2.0
-                    settle_time = max(1, self.setup[part]["settle_time"])
-                    heating_or_cooling = 1.0 if "low" == part else -1.0
-                    unit = self.enclosure.engine.units[sensor_values["unit"]]
-
-                    logger.info(
-                        f"Start the dimmer {relay} in PID modus to go to average value {sensor_average}{unit} with a settle timeout of {settle_time} seconds."
-                    )
-                    self.__dimmers[f"{relay.id}"] = PID(
-                        heating_or_cooling * 1,
-                        heating_or_cooling * 0.1,
-                        heating_or_cooling * 0.05,
-                        setpoint=sensor_average,
-                        sample_time=settle_time,
-                        output_limits=(relay.OFF, relay.ON),
-                    )
-
-                    if relay.state > 0:
-                        dimmer_value = relay.state
-                        logger.info(f"Restoring old dimmer value {dimmer_value}% for relay {relay}")
-                        self.__dimmers[f"{relay.id}"].set_auto_mode(True, last_output=dimmer_value)
-                    else:
-                        dimmer_value = round(self.__dimmers[f"{relay.id}"](sensor_values["current"]))
-                        logger.info(
-                            f'Setting the dimmer {relay} to value {dimmer_value}%. Current value {sensor_values["current"]}{self.enclosure.engine.units[sensor_values["unit"]]}, target of {sensor_average}{self.enclosure.engine.units[sensor_values["unit"]]}'
-                        )
-
-                    self.enclosure.relays[f"{relay.id}"].on(dimmer_value)
-                else:
-                    logger.info(f"Set the relay {relay} to {relay.ON} with 0 seconds delay")
-                    self.enclosure.relays[f"{relay.id}"].on(relay.ON)
+                logger.info(f"Set the relay {relay} to {relay.ON} with 0 seconds delay")
+                self.enclosure.relays[f"{relay.id}"].on(relay.ON)
 
             else:
                 logger.info(f"Set the relay {relay} to {relay.OFF} with 0 seconds delay")
                 self.enclosure.relays[f"{relay.id}"].on(relay.OFF)
                 self.state[part]["timer_on"] = False
-                if relay.id in self.__dimmers:
-                    del self.__dimmers[f"{relay.id}"]
 
 
 class terrariumAreaHumidity(terrariumAreaHeater):
@@ -1411,8 +840,6 @@ class terrariumAreaWatertank(terrariumArea):
 
             sensor_values[key] = 0 if len(sensor_values[key]) == 0 else statistics.mean(sensor_values[key])
 
-        sensor_values["alarm_min"] += self.low_deviation
-        sensor_values["alarm_max"] += self.high_deviation
         sensor_values["alarm"] = (
             not sensor_values["alarm_min"] <= sensor_values["current"] <= sensor_values["alarm_max"]
         )

@@ -40,7 +40,6 @@ RPi.bme280==0.2.4
 RPi.GPIO==0.7.1
 pyserial==3.5
 pigpio==1.78
-simple-pid==2.0.1
 pcf8575==0.3
 
 # Utils

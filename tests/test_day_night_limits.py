@@ -65,7 +65,6 @@ def load_area(is_day, difference, sensors):
     area.type = "heating"
     area.name = "Heat"
     area.mode = "sensors"
-    area.depends_on = []
     # Same state load_setup seeds on first load. Its own seed asks for the 1970 timestamp, which Windows refuses.
     area.state = {"is_day": is_day, "last_update": 0, "powered": None}
     area.load_setup(setup(difference, sensors, is_day))
