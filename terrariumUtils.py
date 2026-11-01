@@ -24,6 +24,7 @@ from math import log
 
 import time
 import uuid
+import urllib.parse
 
 
 # https://stackoverflow.com/a/6798042
@@ -379,6 +380,18 @@ class terrariumUtils:
         return time
 
     @staticmethod
+    def hide_url_secrets(url) -> str:
+        """The address without its query string, user and password: the part that is safe to log.
+
+        Weather and other sources keep an API key in the query string.
+        """
+        try:
+            parts = urllib.parse.urlsplit(str(url))
+            return f"{parts.scheme}://{parts.hostname}{parts.path}"
+        except Exception:
+            return "<address>"
+
+    @staticmethod
     def get_remote_data(url, timeout: int = 3, proxy=None, json: bool = False, post=None):
         data = None
         try:
@@ -431,7 +444,11 @@ class terrariumUtils:
 
         except Exception as ex:
             logger = terrariumLogging.logging.getLogger("terrariumUtils")
-            logger.exception("Error parsing remote data at url %s. Exception %s" % (url, ex))
+            # No traceback and no message: both can hold the full address, with its key
+            logger.error(
+                "Error parsing remote data at url %s. Exception %s"
+                % (terrariumUtils.hide_url_secrets(url), type(ex).__name__)
+            )
 
         return data
 

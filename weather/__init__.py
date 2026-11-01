@@ -72,7 +72,7 @@ class terrariumWeather(object):
             if re.search(terrariumWeather.available_hardware[weather_source].VALID_SOURCE, address, re.IGNORECASE):
                 return super(terrariumWeather, cls).__new__(terrariumWeather.available_hardware[weather_source])
 
-        raise terrariumWeatherException(f"Weather url '{address}' is not valid! Please check your source")
+        raise terrariumWeatherException("Weather url is not valid! Please check your source")
 
     def __init__(self, address, unit_values, language) -> None:
         self._device = {
@@ -100,7 +100,7 @@ class terrariumWeather(object):
         Returns:
             string: Weather type and name with address
         """
-        return f"{self.NAME} using url '{self.address}'"
+        return f"{self.NAME} using url '{terrariumUtils.hide_url_secrets(self.address)}'"
 
     def _get_data(self):
         return {
@@ -190,7 +190,7 @@ class terrariumWeather(object):
         value = terrariumUtils.clean_address(value)
         if value not in [None, "", self.address]:
             logger.info(
-                f"{'Loading' if self.address in [None, ''] else 'Reloading'} weather data due to changing weather source to: {value}"
+                f"{'Loading' if self.address in [None, ''] else 'Reloading'} weather data due to changing weather source to: {terrariumUtils.hide_url_secrets(value)}"
             )
             self._device["address"] = value
             self._device["last_update"] = None
@@ -217,12 +217,12 @@ class terrariumWeather(object):
             return
 
         start = time.time()
-        logger.debug(f"Loading online weather data from source: {self.address}")
+        logger.debug(f"Loading online weather data from source: {terrariumUtils.hide_url_secrets(self.address)}")
 
         data = self._get_data()
         if len(data["forecast"].keys()) == 0:
             logger.error(
-                f"Error loading {self}! Please check your source address: {self.address}. Took: {time.time() - start:.2f} seconds"
+                f"Error loading {self}! Please check your source address. Took: {time.time() - start:.2f} seconds"
             )
             return
 

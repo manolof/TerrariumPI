@@ -35,15 +35,27 @@ def record(level):
     return logging.LogRecord("terrariumUtils", level, __file__, 1, "something failed", None, None)
 
 
-def test_an_error_before_the_database_is_ready_does_not_raise(logging_module):
+def test_an_error_before_the_database_is_ready_does_not_raise_and_is_reported_once(logging_module, caplog):
     handler = logging_module.NotificationLogger()
     handler.notification.message.side_effect = RuntimeError("Mapping is not generated for entity 'NotificationMessage'")
 
-    with mock.patch.object(handler, "handleError") as handle_error:
+    with caplog.at_level(logging.WARNING, logger="terrariumLogging"):
         handler.emit(record(logging.ERROR))
         handler.emit(record(logging.WARNING))
 
-    assert handle_error.call_count == 2
+    reports = [r for r in caplog.records if r.name == "terrariumLogging"]
+    assert len(reports) == 1
+    assert reports[0].levelno == logging.WARNING
+    assert "Mapping is not generated" in reports[0].getMessage()
+
+
+def test_the_report_itself_is_never_sent_as_a_notification(logging_module):
+    handler = logging_module.NotificationLogger()
+
+    for name in ("terrariumLogging", "terrariumNotification", "terrariumWeatherRetry"):
+        handler.emit(logging.LogRecord(name, logging.ERROR, __file__, 1, "x", None, None))
+
+    handler.notification.message.assert_not_called()
 
 
 def test_a_working_notification_is_still_sent(logging_module):

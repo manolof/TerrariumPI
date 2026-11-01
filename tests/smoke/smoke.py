@@ -44,11 +44,32 @@ HTTP_CHECKS = [
     "/",
 ]
 BAD_LOG = re.compile(r"\b(ImportError|ModuleNotFoundError|AttributeError|NameError|SyntaxError)\b")
-# Lines the log check ignores even though they match BAD_LOG: expected hardware errors, by exact text.
-# It is empty on purpose. Hardware that is not there shows up as OSError/FileNotFoundError/gpiozero errors
-# ("[Errno 2] No such file", "failed to connect"), none of which match BAD_LOG, so nothing needs
-# ignoring today. Add an exact line here, with a reason, only if a CI log shows a real hardware case.
+# Exact text of log lines the check accepts: a line that matches BAD_LOG, or the final exception line of a
+# traceback (the line after the frames, for example "FileNotFoundError: [Errno 2] No such file ..."). Only for
+# hardware that is not there, each with its reason. Empty on purpose: add a line only after a CI log shows it.
 ALLOWED_LOG_LINES = ()
+LOG_TAIL_LINES = 80
+
+# Programs and modules the Pi needs at run time. Run in the image itself, before the engine starts.
+COMMANDS = ["rpicam-vid", "ffmpeg", "pigpiod", "pgrep", "nc"]
+IMPORT_CHECK = """
+import importlib, importlib.util, sys
+bad = 0
+for name in ("cv2", "smbus2", "gpiozero", "pigpio", "bluepy.btle", "bme280"):
+    try:
+        importlib.import_module(name)
+        print("ok  import", name)
+    except Exception as ex:
+        bad += 1
+        print("FAIL import", name, type(ex).__name__, ex)
+# RPi.GPIO refuses to import on anything but a Pi, so only look for it
+if importlib.util.find_spec("RPi.GPIO") is None:
+    bad += 1
+    print("FAIL RPi.GPIO is not installed")
+else:
+    print("ok  RPi.GPIO is installed")
+sys.exit(1 if bad else 0)
+"""
 EXPECTED_COUNTS = {"/api/areas/": 4, "/api/sensors/": 2, "/api/relays/": 4, "/api/enclosures/": 1}
 
 MIGRATE_AND_SEED = """
@@ -71,6 +92,17 @@ def run(cmd, check=True, timeout=None):
     if check and result.returncode != 0:
         raise RuntimeError(f"{' '.join(cmd)} failed ({result.returncode}):\n{result.stdout}\n{result.stderr}")
     return result
+
+
+def tracebacks(lines):
+    """Yield (header index, final exception line) for each traceback in the log."""
+    for index, line in enumerate(lines):
+        if not line.startswith("Traceback (most recent call last)"):
+            continue
+        end = index + 1
+        while end < len(lines) and (lines[end].startswith((" ", chr(9))) or lines[end].startswith("Traceback")):
+            end += 1
+        yield index, (lines[end].strip() if end < len(lines) else "")
 
 
 def http_get(path, timeout=10):
@@ -189,6 +221,23 @@ def main():
         )
         print(seeded.stdout.strip(), flush=True)
 
+        for command in COMMANDS:
+            found = run(
+                ["docker", "run", "--rm", "--platform", args.platform, "--entrypoint", "/bin/sh", args.image,
+                 "-c", f"command -v {command}"],
+                check=False,
+                timeout=timeout,
+            )
+            record(f"{command} is in the image", found.returncode == 0, found.stdout.strip())
+        imports = run(
+            ["docker", "run", "--rm", "--platform", args.platform, "--entrypoint", "/opt/venv/bin/python",
+             args.image, "-c", IMPORT_CHECK],
+            check=False,
+            timeout=timeout,
+        )
+        print(imports.stdout.strip(), imports.stderr.strip()[-2000:], flush=True)
+        record("python modules for the camera, I2C and GPIO import", imports.returncode == 0)
+
         run(
             [
                 "docker", "run", "-d", "--name", name, "--platform", args.platform,
@@ -245,10 +294,17 @@ def main():
         logs = logs.stdout + logs.stderr
         engine_log = run(["docker", "exec", name, "cat", "/TerrariumPI/log/terrariumpi.log"], check=False)
         logs += "\n" + engine_log.stdout
-        bad = [line for line in logs.splitlines() if BAD_LOG.search(line) and line.strip() not in ALLOWED_LOG_LINES]
+        lines = logs.splitlines()
+        bad = [line for line in lines if BAD_LOG.search(line) and line.strip() not in ALLOWED_LOG_LINES]
         record("no ImportError/ModuleNotFoundError/AttributeError/NameError/SyntaxError in the logs", not bad)
         for line in bad[:20]:
             print("   ", line[:300])
+        traces = [(i, last) for i, last in tracebacks(lines) if last not in ALLOWED_LOG_LINES]
+        record("no Traceback in the logs, except allowed hardware cases", not traces)
+        for i, last in traces[:20]:
+            print(f"    line {i}: ends with {last[:300]}")
+        print("---- engine log tail, for audit ----")
+        print(os.linesep.join(line[:300] for line in engine_log.stdout.splitlines()[-LOG_TAIL_LINES:]))
     except Exception as ex:
         record("smoke run", False, str(ex))
     finally:

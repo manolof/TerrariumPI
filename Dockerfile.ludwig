@@ -67,14 +67,16 @@ COPY --from=python_builder /etc/apt /etc/apt
 COPY --from=python_builder /opt/venv /opt/venv
 COPY --from=sourcecode /TerrariumPI /TerrariumPI
 
-# pigpio: GPIO daemon (run.sh starts pigpiod). ffmpeg and rpicam-apps-core (rpicam-vid): camera stream.
-# The numpy/OpenCV runtime libraries stay. bluez, ftdi, xslt and sudo are gone.
+# pigpiod: GPIO daemon (run.sh starts it). The `pigpio` package would also pull in python3 and the -dev libraries. ffmpeg and rpicam-apps-core (rpicam-vid): camera stream.
+# libglib2.0-0: bluepy-helper links to it, and bluez (which used to pull it in) is gone.
+# The numpy/OpenCV runtime libraries stay. ftdi, xslt and sudo are gone.
+# No cv2 symlink: it pointed at /usr/lib/python3/dist-packages/cv2*.so from the apt python3-opencv package, which
+# is not installed, so it dangled; cv2 comes from opencv-python-headless in the venv (smoke.py imports it).
 RUN  apt-get -o Acquire::ForceIPv4=true update \
   && apt-get -o Acquire::ForceIPv4=true full-upgrade -y --no-install-recommends \
-  && apt-get -o Acquire::ForceIPv4=true install -y --no-install-recommends netcat-openbsd procps pigpio ffmpeg libssl1.1 libatlas3-base libopenblas0 libgfortran5 libwebpdemux2 libraspberrypi-bin rpicam-apps-core \
+  && apt-get -o Acquire::ForceIPv4=true install -y --no-install-recommends netcat-openbsd procps libglib2.0-0 pigpiod ffmpeg libssl1.1 libatlas3-base libopenblas0 libgfortran5 libwebpdemux2 libraspberrypi-bin rpicam-apps-core \
   && apt-get --purge autoremove -y \
   && apt-get autoclean \
-  && ln -s /usr/lib/python3/dist-packages/cv2.cpython-311-arm-linux-gnueabihf.so /opt/venv/lib/python3.11/site-packages/cv2.cpython-311-arm-linux-gnueabihf.so \
   && rm -rf /var/lib/apt/lists/* \
   && find /var/log/ -type f -delete \
   && find /var/cache/ -type f -delete

@@ -7,6 +7,9 @@ relayLogger = terrariumLogging.logging.getLogger("terrariumRelay")
 webcamLogger = terrariumLogging.logging.getLogger("terrariumWebcam")
 enclosureLogger = terrariumLogging.logging.getLogger("terrariumEnclosure")
 weatherLogger = terrariumLogging.logging.getLogger("terrariumWeather")
+# Repeat failures of the weather retry go here: terrariumLogging.NotificationLogger does not mail this logger,
+# so only the first failure raises a system_error line.
+weatherRetryLogger = terrariumLogging.logging.getLogger("terrariumWeatherRetry")
 
 import threading
 import time
@@ -59,6 +62,8 @@ def N_(message):
 
 class terrariumEngine(object):
     __ENGINE_LOOP_TIMEOUT = float(os.environ.get("TPI_ENGINE_TIMEOUT", 30))  # in seconds
+    _WEATHER_RETRY_INTERVAL = 5 * 60  # seconds between tries to build a weather source that failed
+    _WEATHER_RETRY_TIMEOUT = 15  # seconds one try may take
     __VERSION_UPDATE_CHECK_TIMEOUT = 1  # in days
 
     # A timed run that fails to switch off is tried again this many times, this many seconds apart
@@ -117,6 +122,8 @@ class terrariumEngine(object):
         self.latest_version = None
         self.update_available = False
         self.weather = None
+        self._weather_failed = False
+        self._weather_retry_at = 0.0
         # Dirty hack for device info ... :(
         self.device = Path("/proc/device-tree/model").read_text().rstrip("\x00")
         os_version = re.search(
@@ -394,12 +401,59 @@ class terrariumEngine(object):
                 try:
                     self.weather = terrariumWeather(self.settings["weather_source"], self.units, self.active_language)
                 except Exception as ex:
-                    weatherLogger.error(f"Failed loading weather data: {ex}")
+                    # Only the type: the message can hold the source address, and that holds a key
+                    self._weather_failed = True
+                    self._weather_retry_at = time.time() + self._WEATHER_RETRY_INTERVAL
+                    weatherLogger.error(
+                        f"Failed loading weather data ({type(ex).__name__}). Will try again every {self._WEATHER_RETRY_INTERVAL // 60} minutes."
+                    )
 
             elif self.weather is not None:
                 self.weather.address = self.settings["weather_source"]
                 # Force an update, due to maybe changing speed units or temperature.... lazy fix... :(
                 self.weather.update()
+
+    def _retry_weather(self) -> None:
+        """Build the weather source again after it failed at start-up (or earlier retries).
+
+        Areas in weather mode follow engine.weather, so once it exists they make their timetable on the next
+        update. Tries at most every 5 minutes, takes at most 15 seconds, and never logs the source address.
+        """
+        if self.weather is not None or not self.settings.get("weather_source"):
+            return
+
+        now = time.time()
+        if now < self._weather_retry_at:
+            return
+
+        self._weather_retry_at = now + self._WEATHER_RETRY_INTERVAL
+        reason = None
+        try:
+            self.weather = func_timeout(
+                self._WEATHER_RETRY_TIMEOUT,
+                terrariumWeather,
+                (self.settings["weather_source"], self.units, self.active_language),
+            )
+        except Exception as ex:
+            # Only the type: the message can hold the source address, and that holds a key
+            reason = type(ex).__name__
+        except FunctionTimedOut:  # not an Exception subclass
+            reason = f"no answer within {self._WEATHER_RETRY_TIMEOUT} seconds"
+
+        if reason is None:
+            self._weather_failed = False
+            weatherLogger.info("Weather data loaded after an earlier failure. Weather areas resume their schedule.")
+            return
+
+        message = (
+            f"Weather data is still not available ({reason}), so weather areas keep their lights as they are. "
+            f"Next try in {self._WEATHER_RETRY_INTERVAL // 60} minutes."
+        )
+        if self._weather_failed:
+            weatherRetryLogger.error(message)
+        else:
+            self._weather_failed = True
+            weatherLogger.error(message)
 
     # -=NEW=-
     def __update_checker(self):
@@ -1355,6 +1409,7 @@ class terrariumEngine(object):
             start = time.time()
 
             # Weather data
+            self._retry_weather()
             if self.weather is not None:
                 self.weather.update()
 

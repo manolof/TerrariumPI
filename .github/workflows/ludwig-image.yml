@@ -56,6 +56,7 @@ jobs:
         run: python3 tests/smoke/smoke.py "${IMAGE}:ludwig-${{ steps.vars.outputs.sha }}" --platform linux/arm/v7
 
       - name: Log in to ghcr.io
+        if: github.ref == 'refs/heads/ludwig'
         uses: docker/login-action@v4
         with:
           registry: ghcr.io
@@ -63,4 +64,5 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Push (only after the smoke test passed)
+        if: github.ref == 'refs/heads/ludwig'
         run: docker push "${IMAGE}:ludwig-${{ steps.vars.outputs.sha }}"

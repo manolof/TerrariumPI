@@ -79,22 +79,35 @@ class TimedCompressedRotatingFileHandler(logging.handlers.TimedRotatingFileHandl
         compress.start()
 
 
+# Loggers whose lines are never turned into notification messages: terrariumNotification (it would loop),
+# terrariumLogging (this handler reporting its own failure) and terrariumWeatherRetry (repeat failures of a
+# retry whose first failure was already sent).
+NOT_NOTIFIED = ("terrariumNotification", "terrariumLogging", "terrariumWeatherRetry")
+
+
 class NotificationLogger(logging.StreamHandler):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
+        self._reported_failures = set()
 
         # The notification will later on get a reference to the terrariumEngine for version and profile information
         self.notification = terrariumNotification()
 
     def emit(self, record) -> None:
         # Do not send messages from terrariumNotification logging, as that will trigger a recursing error.
-        if "terrariumNotification" != record.name and str(record.levelname.lower()) in ["warning", "error"]:
+        if record.name not in NOT_NOTIFIED and str(record.levelname.lower()) in ["warning", "error"]:
             try:
                 self.notification.message(f"system_{record.levelname.lower()}", {"message": record.getMessage()})
-            except Exception:
+            except Exception as ex:
                 # A log call must never stop the program. Before the database mapping exists (start-up),
-                # the notification lookup fails. Report it like any logging error and carry on.
-                self.handleError(record)
+                # the notification lookup fails. Say so in the engine log, once per kind of failure, on a
+                # logger this handler skips, so it cannot loop. The lost message itself is in the log already.
+                failure = f"{type(ex).__name__}: {ex}"
+                if failure not in self._reported_failures:
+                    self._reported_failures.add(failure)
+                    logging.getLogger("terrariumLogging").warning(
+                        f"A {record.levelname.lower()} line was not sent as a notification ({failure})."
+                    )
 
 
 if os.path.isfile("log/logging.custom.cfg"):

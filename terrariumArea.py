@@ -459,6 +459,11 @@ class terrariumArea(object):
                 self.state[period]["powered"] = self.relays_state(period)
                 continue
 
+            if self.mode in WEATHER_MODES and "timetable" not in self.setup[period]:
+                # The weather arrived after start-up (see terrariumEngine._retry_weather): make the schedule now
+                logger.info(f"Making the first timetable for {self} period: {period}")
+                self._time_table()
+
             if "sensors" != self.mode:
                 # Weather(inverse) and timer mode
                 toggle_relay = self._is_timer_time(period)
