@@ -1,4 +1,6 @@
 """A timed relay run, and timed relays that start off after an engine restart."""
+import logging
+import threading
 from datetime import datetime
 from types import SimpleNamespace
 from unittest import mock
@@ -52,6 +54,8 @@ def make_area(db, name, setup):
 def make_engine(*relay_ids, dimmers=()):
     engine = terrariumEngine.terrariumEngine.__new__(terrariumEngine.terrariumEngine)
     engine._terrariumEngine__timed_runs = {}
+    engine._terrariumEngine__timed_runs_lock = threading.RLock()
+    engine._terrariumEngine__stopping = False
     engine.relays = {}
     for relay_id in relay_ids:
         engine.relays[relay_id] = SimpleNamespace(
@@ -167,6 +171,132 @@ def test_engine_stop_cancels_runs_and_switches_off(mist, timers):
     timers[0].cancel.assert_called_once()
     assert mist._terrariumEngine__timed_runs == {}
     assert calls(mist, "mist") == [(OFF,)]
+
+
+def runs(engine):
+    return engine._terrariumEngine__timed_runs
+
+
+def errors(caplog):
+    return [r for r in caplog.records if r.levelno == logging.ERROR]
+
+
+def test_a_failed_hand_off_keeps_the_timer(mist, timers, caplog):
+    mist.relay_run("mist", 30)
+    mist.relays["mist"].set_state.return_value = False
+    with orm.db_session(), caplog.at_level(logging.ERROR):
+        assert mist.toggle_relay(mist_row(), "off") is False
+    timers[0].cancel.assert_not_called()
+    assert "mist" in runs(mist)
+    assert errors(caplog)
+
+
+def test_a_failed_timer_off_retries_three_times_then_logs(mist, timers, caplog):
+    mist.relay_run("mist", 30)
+    mist.relays["mist"].set_state.side_effect = lambda value: value == ON
+    with caplog.at_level(logging.ERROR):
+        timers[0].function()
+        for number in (1, 2, 3):
+            assert len(timers) == number + 1 and timers[number].interval == 5
+            assert "mist" in runs(mist)
+            timers[number].function()
+    assert len(timers) == 4
+    assert calls(mist, "mist") == [(ON,)] + [(OFF,)] * 4
+    assert runs(mist) == {}
+    assert len(errors(caplog)) == 4
+    assert "after 4 attempts" in errors(caplog)[-1].getMessage()
+
+
+def test_a_timer_off_that_raises_is_a_failure_and_a_later_success_ends_the_run(mist, timers, caplog):
+    mist.relay_run("mist", 30)
+    outcomes = iter([RuntimeError("bus"), True])
+
+    def set_state(value):
+        if value == ON:
+            return True
+        outcome = next(outcomes)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    mist.relays["mist"].set_state.side_effect = set_state
+    with caplog.at_level(logging.ERROR):
+        timers[0].function()
+        assert "mist" in runs(mist) and len(timers) == 2
+        timers[1].function()
+    assert runs(mist) == {}
+    assert errors(caplog)
+
+
+class FakeRelay:
+    pass
+
+
+def test_deleting_a_relay_during_a_run_switches_it_off(mist, timers):
+    mist.relay_run("mist", 30)
+    hardware = mist.relays["mist"]
+    hardware.stop = mock.MagicMock()
+    with mock.patch.object(terrariumEngine, "terrariumRelay", FakeRelay), mock.patch.object(
+        terrariumEngine, "terrariumButton", type("B", (), {})
+    ):
+        FakeRelay.OFF, FakeRelay.ON = OFF, ON
+        assert mist.delete(FakeRelay, "mist") is True
+    assert [c.args for c in hardware.set_state.call_args_list] == [(ON,), (OFF,)]
+    timers[0].cancel.assert_called_once()
+    assert "mist" not in mist.relays and runs(mist) == {}
+    timers[0].function()  # a stale firing finds nothing to do and does not raise
+    assert [c.args for c in hardware.set_state.call_args_list] == [(ON,), (OFF,)]
+
+
+def test_the_timer_for_a_deleted_relay_does_not_raise(mist, timers, caplog):
+    mist.relay_run("mist", 30)
+    del mist.relays["mist"]
+    with caplog.at_level(logging.ERROR):
+        timers[0].function()
+    assert runs(mist) == {} and errors(caplog)
+
+
+def test_a_timer_firing_after_engine_stop_does_nothing(mist, timers):
+    mist.relay_run("mist", 30)
+    mist._stop_timed_runs()
+    mist.relays["mist"].set_state.reset_mock()
+    timers[0].function()
+    assert calls(mist, "mist") == []
+    with pytest.raises(ValueError):
+        mist.relay_run("mist", 30)
+
+
+def test_engine_stop_waits_for_a_timer_that_is_switching_off(mist, timers):
+    mist.relay_run("mist", 30)
+    inside, release = threading.Event(), threading.Event()
+
+    def set_state(value):
+        if value == OFF:
+            inside.set()
+            release.wait(5)
+        return True
+
+    mist.relays["mist"].set_state.side_effect = set_state
+    firing = threading.Thread(target=timers[0].function)
+    firing.start()
+    assert inside.wait(5)
+    stopping = threading.Thread(target=mist._stop_timed_runs)
+    stopping.start()
+    stopping.join(0.3)
+    assert stopping.is_alive()  # teardown waits for the switch in progress
+    release.set()
+    firing.join(5)
+    stopping.join(5)
+    assert not stopping.is_alive() and runs(mist) == {}
+    assert calls(mist, "mist") == [(ON,), (OFF,)]
+
+
+def test_a_failed_off_at_engine_stop_is_logged(mist, timers, caplog):
+    mist.relay_run("mist", 30)
+    mist.relays["mist"].set_state.return_value = False
+    with caplog.at_level(logging.ERROR):
+        mist._stop_timed_runs()
+    assert errors(caplog) and runs(mist) == {}
 
 
 def mist_row():

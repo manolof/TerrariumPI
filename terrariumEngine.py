@@ -57,6 +57,10 @@ class terrariumEngine(object):
     __ENGINE_LOOP_TIMEOUT = float(os.environ.get("TPI_ENGINE_TIMEOUT", 30))  # in seconds
     __VERSION_UPDATE_CHECK_TIMEOUT = 1  # in days
 
+    # A timed run that fails to switch off is tried again this many times, this many seconds apart
+    __RUN_OFF_RETRIES = 3
+    __RUN_OFF_WAIT = 5
+
     def __init__(self, version) -> None:
         self.starttime = time.time()
         # Default system units
@@ -104,6 +108,8 @@ class terrariumEngine(object):
 
         # Timed relay runs by relay id. Each holds the timer that switches the relay off again.
         self.__timed_runs = {}
+        self.__timed_runs_lock = threading.RLock()
+        self.__stopping = False
 
         self.version = version
         self.latest_version = None
@@ -537,6 +543,8 @@ class terrariumEngine(object):
 
         elif issubclass(item, terrariumRelay):
             if item_id in self.relays:
+                # A relay with a timed run is switched off before it goes
+                self.__relay_run_abort(item_id)
                 self.relays[item_id].stop()
                 del self.relays[item_id]
             delete_ok = True
@@ -1035,16 +1043,17 @@ class terrariumEngine(object):
         with orm.db_session():
             value = Relay[relay_id].value
 
-        if relay_id in self.__timed_runs or (value is not None and value != terrariumRelay.OFF):
-            raise ValueError(f"Relay {relay_id} is already on.")
+        with self.__timed_runs_lock:
+            if self.__stopping:
+                raise ValueError("The engine is stopping.")
 
-        if not hardware.set_state(terrariumRelay.ON):
-            raise ValueError(f"Relay {relay_id} could not be switched on.")
+            if relay_id in self.__timed_runs or (value is not None and value != terrariumRelay.OFF):
+                raise ValueError(f"Relay {relay_id} is already on.")
 
-        timer = threading.Timer(seconds, self.__relay_run_end, args=(relay_id,))
-        timer.daemon = True
-        self.__timed_runs[relay_id] = timer
-        timer.start()
+            if not hardware.set_state(terrariumRelay.ON):
+                raise ValueError(f"Relay {relay_id} could not be switched on.")
+
+            self.__start_run_timer(relay_id, seconds, 1)
 
         relayLogger.info(f"Relay {relay_id} is on for {seconds} seconds.")
         return {
@@ -1053,36 +1062,74 @@ class terrariumEngine(object):
             "until": (datetime.datetime.now() + datetime.timedelta(seconds=seconds)).isoformat(),
         }
 
+    def __start_run_timer(self, relay_id: str, delay: float, attempt: int) -> None:
+        # Caller holds the lock
+        timer = threading.Timer(delay, self.__relay_run_end, args=(relay_id, attempt))
+        timer.daemon = True
+        self.__timed_runs[relay_id] = timer
+        timer.start()
+
     def relay_run_stop(self, relay_id: str) -> None:
         """Cancel the timed run of a relay, if there is one. The relay itself is left as it is."""
-        timer = self.__timed_runs.pop(relay_id, None)
+        with self.__timed_runs_lock:
+            timer = self.__timed_runs.pop(relay_id, None)
+
         if timer is not None:
             timer.cancel()
             relayLogger.info(f"Cancelled the timed run of relay {relay_id}.")
 
-    def __relay_run_end(self, relay_id: str) -> None:
-        # The time is up: switch off the same way a hand Off does, which also removes the run
+    def __relay_off(self, relay_id: str) -> bool:
         try:
-            with orm.db_session():
-                self.toggle_relay(Relay[relay_id], "off")
+            return bool(self.relays[relay_id].set_state(terrariumRelay.OFF))
         except Exception as ex:
-            relayLogger.error(f"Could not switch off relay {relay_id} at the end of a timed run: {ex}.")
-        finally:
-            self.__timed_runs.pop(relay_id, None)
+            relayLogger.error(f"Error switching off relay {relay_id}: {ex}.")
+            return False
+
+    def __relay_run_end(self, relay_id: str, attempt: int = 1) -> None:
+        # The time is up. The run stays registered until the relay is confirmed off, or the attempts run out.
+        # The lock is held while switching, so engine stop can not tear the relay down underneath.
+        with self.__timed_runs_lock:
+            if self.__stopping or relay_id not in self.__timed_runs:
+                # Engine stop or a hand action has taken over the run
+                return
+
+            if relay_id not in self.relays:
+                relayLogger.error(f"Relay {relay_id} is gone at the end of its timed run.")
+                del self.__timed_runs[relay_id]
+                return
+
+            if self.__relay_off(relay_id):
+                del self.__timed_runs[relay_id]
+                relayLogger.info(f"Timed run of relay {relay_id} ended, relay is off.")
+                return
+
+            if attempt <= terrariumEngine.__RUN_OFF_RETRIES:
+                relayLogger.error(
+                    f"Relay {relay_id} did not switch off at the end of its timed run (attempt {attempt}). Trying again in {terrariumEngine.__RUN_OFF_WAIT} seconds."
+                )
+                self.__start_run_timer(relay_id, terrariumEngine.__RUN_OFF_WAIT, attempt + 1)
+            else:
+                relayLogger.error(
+                    f"Relay {relay_id} did not switch off at the end of its timed run after {attempt} attempts. It may still be ON, switch it off by hand."
+                )
+                del self.__timed_runs[relay_id]
+
+    def __relay_run_abort(self, relay_id: str) -> None:
+        """Cancel the run of a relay and switch the relay off, when it has a run."""
+        with self.__timed_runs_lock:
+            had_run = relay_id in self.__timed_runs
+            self.relay_run_stop(relay_id)
+            if had_run and not self.__relay_off(relay_id):
+                relayLogger.error(f"Relay {relay_id} could not be switched off when its timed run was stopped.")
 
     def _stop_timed_runs(self) -> None:
-        for relay_id in list(self.__timed_runs):
-            self.relay_run_stop(relay_id)
-            try:
-                self.relays[relay_id].set_state(terrariumRelay.OFF)
-            except Exception as ex:
-                relayLogger.error(f"Could not switch off relay {relay_id} while stopping: {ex}.")
+        with self.__timed_runs_lock:
+            self.__stopping = True
+            for relay_id in list(self.__timed_runs):
+                self.__relay_run_abort(relay_id)
 
     def toggle_relay(self, relay, action: str = "toggle", duration: int = 0):
         ok = False
-
-        # Any hand action ends a timed run, so the timer cannot switch off what is then on by hand
-        self.relay_run_stop(relay.id)
 
         # Convert the action to an int value
         if "on" == action:
@@ -1094,8 +1141,19 @@ class terrariumEngine(object):
         else:
             action = int(action)
 
-        # Toggle the switch, will return ok = true when succeeded
-        ok = self.relays[relay.id].set_state(action)
+        if action == terrariumRelay.OFF:
+            # Off: the run is only ended when the relay is confirmed off. Otherwise the timer stays, to try again.
+            ok = self.relays[relay.id].set_state(action)
+            if ok:
+                self.relay_run_stop(relay.id)
+            elif relay.id in self.__timed_runs:
+                relayLogger.error(f"Relay {relay.id} did not switch off by hand, its timed run is kept.")
+        else:
+            # Any other hand action ends a timed run first, so the timer can not switch off what is then on by hand
+            self.relay_run_stop(relay.id)
+            # Toggle the switch, will return ok = true when succeeded
+            ok = self.relays[relay.id].set_state(action)
+
         return ok
 
     def callback_relay(self, relay, state) -> None:

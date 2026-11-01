@@ -410,19 +410,20 @@ class terrariumAPI(object):
             name="api:relay_export",
         )
 
-        bottle_app.route(
-            "/api/relays/<relay:path>/<action:re:(toggle|on|off|\d+)>/",
-            "POST",
-            self.relay_action,
-            apply=self.authentication(),
-            name="api:relay_action",
-        )
+        # Before the on/off route: its <relay:path> would otherwise take "x/run" as the relay id
         bottle_app.route(
             "/api/relays/<relay:path>/run/<seconds:int>/",
             "POST",
             self.relay_run,
             apply=self.authentication(),
             name="api:relay_run",
+        )
+        bottle_app.route(
+            "/api/relays/<relay:path>/<action:re:(toggle|on|off|\d+)>/",
+            "POST",
+            self.relay_action,
+            apply=self.authentication(),
+            name="api:relay_action",
         )
         bottle_app.route(
             "/api/relays/<relay:path>/manual/",
