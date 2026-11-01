@@ -167,8 +167,10 @@ def test_the_doors_are_closed_with_no_buttons(enclosure_class):
 
 def test_the_restart_route_is_kept(app):
     # Both UIs POST /api/restart/; the handler needs the engine, so only the routing is checked
-    for action in ("restart", "reboot", "shutdown"):
-        assert call(app, "POST", f"/api/{action}/")[0] != 404, action
+    assert call(app, "POST", "/api/restart/")[0] != 404
+    # Reboot and Shut down never worked in Docker, so the routes are gone
+    for action in ("reboot", "shutdown"):
+        assert call(app, "POST", f"/api/{action}/")[0] == 404, action
     assert call(app, "GET", "/api/restart/")[0] == 405
 
 

@@ -259,7 +259,7 @@ class terrariumAPI(object):
 
         # Reboot/start API
         bottle_app.route(
-            "/api/<action:re:(restart|reboot|shutdown)>/",
+            "/api/<action:re:(restart)>/",
             "POST",
             self.server_action,
             apply=self.authentication(),
@@ -965,12 +965,6 @@ class terrariumAPI(object):
         if "restart" == action:
             self.webserver.engine.restart()
             return {"message": f'TerrariumPI {self.webserver.engine.settings["version"]} is being restarted!'}
-        elif "reboot" == action:
-            self.webserver.engine.reboot()
-            return {"message": f'TerrariumPI {self.webserver.engine.settings["version"]} is being rebooted!'}
-        elif "shutdown" == action:
-            self.webserver.engine.shutdown()
-            return {"message": f'TerrariumPI {self.webserver.engine.settings["version"]} is being shutdown!'}
 
     # Relays
     @orm.db_session(sql_debug=DEBUG, show_values=DEBUG)
