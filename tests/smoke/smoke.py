@@ -7,7 +7,8 @@ What it does:
   1. Creates a Docker volume for /TerrariumPI/data.
   2. Applies the real migrations (yoyo, as terrariumDatabase.init does) and then tests/smoke/seed.sql
      (four areas, two sensors, four relays and the enclosure, from the scrubbed terrarium-ui fixtures).
-  3. Starts the engine from the image with no GPIO, no camera and no I2C. Hardware errors are expected.
+  3. Starts the engine from the image through tests/smoke/launch.py (answers the Pi-only CPU serial and
+     device-tree model reads) with no GPIO, no camera and no I2C. Hardware errors are expected.
   4. Waits up to SMOKE_TIMEOUT seconds (default 600, QEMU is slow) for the HTTP checks to pass.
   5. Checks /live/ with a plain-socket websocket client.
   6. Fails on ImportError, ModuleNotFoundError, AttributeError, NameError or SyntaxError in the container
@@ -189,7 +190,8 @@ def main():
                 "-p", f"127.0.0.1:{PORT}:{PORT}",
                 "-v", f"{volume}:/TerrariumPI/data",
                 "-e", "AUTO_REBOOT=false",
-                args.image,
+                "-v", f"{Path(__file__).resolve().parent}:/smoke:ro",
+                args.image, "/opt/venv/bin/python", "/smoke/launch.py",
             ]
         )
 

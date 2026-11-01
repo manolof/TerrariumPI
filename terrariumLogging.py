@@ -89,7 +89,12 @@ class NotificationLogger(logging.StreamHandler):
     def emit(self, record) -> None:
         # Do not send messages from terrariumNotification logging, as that will trigger a recursing error.
         if "terrariumNotification" != record.name and str(record.levelname.lower()) in ["warning", "error"]:
-            self.notification.message(f"system_{record.levelname.lower()}", {"message": record.getMessage()})
+            try:
+                self.notification.message(f"system_{record.levelname.lower()}", {"message": record.getMessage()})
+            except Exception:
+                # A log call must never stop the program. Before the database mapping exists (start-up),
+                # the notification lookup fails. Report it like any logging error and carry on.
+                self.handleError(record)
 
 
 if os.path.isfile("log/logging.custom.cfg"):
