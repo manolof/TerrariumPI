@@ -1,0 +1,89 @@
+# Slim image for Ludwig's enclosure. Derived from Dockerfile.bookworm.
+# Removed: the sispmctl build, the 3rdparty libraries and their patches, bluez,
+# lxml/ALSA build libraries, ftdi, sudo, the Java option.
+# Built by .github/workflows/ludwig-image.yml:
+# docker buildx build --platform linux/arm/v7 -f Dockerfile.ludwig -t ghcr.io/manolof/terrariumpi:ludwig-<sha> .
+
+# python builder, help keep image small
+FROM python:3.11-bookworm AS python_builder
+ENV PIP_DEFAULT_TIMEOUT=100 \
+    # Allow statements and log messages to immediately appear
+    PYTHONUNBUFFERED=1 \
+    # disable a pip version check to reduce run-time & log-spam
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    # cache is useless in docker image, so disable to reduce image size
+    PIP_NO_CACHE_DIR=1 \
+    # do not create __pycache__/ files
+    PYTHONDONTWRITEBYTECODE=1
+ENV PATH="/opt/venv/bin:$PATH"
+RUN python -m venv /opt/venv
+RUN pip install --upgrade pip==24.1.2 && pip install --upgrade wheel==0.43.0
+
+COPY requirements.txt /
+
+# The Raspberry Pi apt repository is added here and copied (/etc/apt) into the final image,
+# which takes rpicam-apps-core and libraspberrypi-bin from it.
+# Some strange DNS issues with installing PGP keys. keyserver.ubuntu.com => 185.125.188.26
+# libglib2.0-dev is for building bluepy, which the sensor code still imports.
+RUN  apt-get -o Acquire::ForceIPv4=true update \
+  && apt-get -o Acquire::ForceIPv4=true install -y --no-install-recommends gnupg \
+  && echo "deb http://raspbian.raspberrypi.org/raspbian/ bookworm main contrib non-free rpi" > /etc/apt/sources.list.d/raspberrypi.list \
+  && echo "deb http://archive.raspberrypi.org/debian/ bookworm main" >> /etc/apt/sources.list.d/raspberrypi.list \
+  && apt-key adv --keyserver 185.125.188.26 --recv-keys 9165938D90FDDD2E 82B129927FA3303E \
+  && apt-get -o Acquire::ForceIPv4=true update \
+  && apt-get -o Acquire::ForceIPv4=true install -y --no-install-recommends libglib2.0-dev make
+
+# pip will exit with non 0 on a conflict, which stops the build. paho-mqtt and icalendar are no longer
+# in requirements.txt, so their sed lines are gone.
+RUN  pip install smbus==1.1.post2 --extra-index-url https://www.piwheels.org/simple \
+  && pip install -r requirements.txt --extra-index-url https://www.piwheels.org/simple \
+  && find /opt/venv -type d -name "test*" | xargs rm -rf  \
+  && find /opt/venv -type d -name "__pycache__" | xargs rm -rf \
+  && find /opt/venv -type d -name ".git" | xargs rm -rf \
+  && find /opt/venv -type f -name "*.pyc" -delete
+
+# Sourcecode cleanup and pre-prep
+FROM python:3.11-bookworm AS sourcecode
+WORKDIR /TerrariumPI
+COPY . .
+RUN rm -Rf .git .github .venv 3rdparty gui docs screenshots tests package*.json postcss.config.* rollup.config.js .env.* html-template.js requirements.txt yarn.lock
+
+# actual image
+FROM python:3.11-slim-bookworm AS finalimage
+ARG GITHUB_SHA="development"
+ENV PIP_DEFAULT_TIMEOUT=100 \
+    # Allow statements and log messages to immediately appear
+    PYTHONUNBUFFERED=1 \
+    # disable a pip version check to reduce run-time & log-spam
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    # cache is useless in docker image, so disable to reduce image size
+    PIP_NO_CACHE_DIR=1 \
+    # do not create __pycache__/ files
+    PYTHONDONTWRITEBYTECODE=1
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PATH="/opt/venv/bin:$PATH"
+
+COPY --from=python_builder /etc/apt /etc/apt
+COPY --from=python_builder /opt/venv /opt/venv
+COPY --from=sourcecode /TerrariumPI /TerrariumPI
+
+# pigpio: GPIO daemon (run.sh starts pigpiod). ffmpeg and rpicam-apps-core (rpicam-vid): camera stream.
+# The numpy/OpenCV runtime libraries stay. bluez, ftdi, xslt and sudo are gone.
+RUN  apt-get -o Acquire::ForceIPv4=true update \
+  && apt-get -o Acquire::ForceIPv4=true full-upgrade -y --no-install-recommends \
+  && apt-get -o Acquire::ForceIPv4=true install -y --no-install-recommends netcat-openbsd procps pigpio ffmpeg libssl1.1 libatlas3-base libopenblas0 libgfortran5 libwebpdemux2 libraspberrypi-bin rpicam-apps-core \
+  && apt-get --purge autoremove -y \
+  && apt-get autoclean \
+  && ln -s /usr/lib/python3/dist-packages/cv2.cpython-311-arm-linux-gnueabihf.so /opt/venv/lib/python3.11/site-packages/cv2.cpython-311-arm-linux-gnueabihf.so \
+  && rm -rf /var/lib/apt/lists/* \
+  && find /var/log/ -type f -delete \
+  && find /var/cache/ -type f -delete
+
+WORKDIR /TerrariumPI
+# Set git version in a temp file
+RUN echo "${GITHUB_SHA}" > .gitversion && echo '[ ! -z "$TERM" -a -r /TerrariumPI/motd.sh ] && /TerrariumPI/motd.sh' >> /etc/bash.bashrc
+
+HEALTHCHECK --interval=180s --timeout=5s --start-period=120s CMD python contrib/docker_health.py
+
+ENTRYPOINT ["/bin/bash", "/TerrariumPI/run.sh"]
+CMD ["/opt/venv/bin/python", "/TerrariumPI/terrariumPI.py"]
