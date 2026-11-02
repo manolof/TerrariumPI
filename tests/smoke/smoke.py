@@ -51,7 +51,10 @@ ALLOWED_LOG_LINES = ()
 LOG_TAIL_LINES = 80
 
 # Programs and modules the Pi needs at run time. Run in the image itself, before the engine starts.
-COMMANDS = ["rpicam-vid", "ffmpeg", "pigpiod", "pgrep", "nc"]
+COMMANDS = ["rpicam-vid", "ffmpeg", "pigpiod", "pigs", "pgrep", "nc"]
+# The Pi runs the legacy camera stack (start_x=1 in its boot config): rpicam-vid finds no camera there, and
+# rpilive_webcam.sh prefers raspivid. The engine looks for it at exactly /usr/bin/raspivid.
+RASPIVID_CHECK = "command -v raspivid || echo 'raspivid: not found'; ldd /usr/bin/raspivid"
 IMPORT_CHECK = """
 import importlib, importlib.util, sys
 bad = 0
@@ -92,6 +95,14 @@ def run(cmd, check=True, timeout=None):
     if check and result.returncode != 0:
         raise RuntimeError(f"{' '.join(cmd)} failed ({result.returncode}):\n{result.stdout}\n{result.stderr}")
     return result
+
+
+def raspivid_problems(returncode, output):
+    """What keeps raspivid from running, from the output of RASPIVID_CHECK. Empty when it can run."""
+    problems = [line.strip() for line in output.splitlines() if "not found" in line]
+    if returncode != 0 and not problems:
+        problems.append(f"ldd exit code {returncode}")
+    return problems
 
 
 def tracebacks(lines):
@@ -229,6 +240,15 @@ def main():
                 timeout=timeout,
             )
             record(f"{command} is in the image", found.returncode == 0, found.stdout.strip())
+        raspivid = run(
+            ["docker", "run", "--rm", "--platform", args.platform, "--entrypoint", "/bin/sh", args.image,
+             "-c", RASPIVID_CHECK],
+            check=False,
+            timeout=timeout,
+        )
+        print(raspivid.stdout.strip(), raspivid.stderr.strip()[-2000:], flush=True)
+        problems = raspivid_problems(raspivid.returncode, raspivid.stdout + raspivid.stderr)
+        record("raspivid is in the image with all its libraries", not problems, "; ".join(problems))
         imports = run(
             ["docker", "run", "--rm", "--platform", args.platform, "--entrypoint", "/opt/venv/bin/python",
              args.image, "-c", IMPORT_CHECK],

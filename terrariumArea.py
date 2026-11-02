@@ -2,6 +2,8 @@
 import terrariumLogging
 
 logger = terrariumLogging.logging.getLogger(__name__)
+# Lines that repeat while the weather is missing. The notification handler skips this logger (see terrariumLogging).
+weatherRetryLogger = terrariumLogging.logging.getLogger("terrariumWeatherRetry")
 
 import copy
 import datetime
@@ -174,8 +176,9 @@ class terrariumArea(object):
 
         if "weather" == self.mode or "weather_inverse" == self.mode:
             if self.enclosure.weather is None:
-                # No weather source, or it could not be loaded at start-up. There are no sun times to plan from,
-                # and none are made up: the timetable and the lights stay as they are.
+                # No weather source, or building it failed at start-up (only that is retried). A network failure on a
+                # source that was built usually gives an empty forecast and default sun times, not None. Here there
+                # are no sun times to plan from, and none are made up: the timetable and the lights stay as they are.
                 logger.error(f"No weather data for {self}, so no timetable can be made. The lights are left as they are.")
                 return False
 
@@ -454,8 +457,9 @@ class terrariumArea(object):
                 continue
 
             if self.mode in WEATHER_MODES and self.enclosure.weather is None:
-                # No weather data: leave the relays as they are, and say so
-                logger.warning(f"No weather data for {self}: its relays are left as they are.")
+                # No weather data: leave the relays as they are, and say so. This comes every round for every area, so
+                # on the logger the notification handler skips: it must not mail.
+                weatherRetryLogger.warning(f"No weather data for {self}: its relays are left as they are.")
                 self.state[period]["powered"] = self.relays_state(period)
                 continue
 
@@ -543,6 +547,7 @@ class terrariumArea(object):
                 toggle_relay is False
                 and not self.relays_state(period, False)
                 and not self.state[period].get("timer_on", False)
+                and not self._period_in_run(period)
             ):
                 self.relays_toggle(period, False)
 
@@ -555,6 +560,10 @@ class terrariumArea(object):
             f"Updated area {self} in '{self.mode}' mode at enclosure {self.enclosure.name} in {time.time()-start:.2f} seconds."
         )
         return self.state
+
+    def _period_in_run(self, period) -> bool:
+        # A timed run ends by itself. With ignore_high on, an ordinary reading counts as a high alarm, and would cut it.
+        return any(self.enclosure.engine.relay_in_run(relay) for relay in self.setup[period]["relays"])
 
     def current_value(self, sensors):
         sensor_values = {"current": [], "alarm_max": [], "alarm_min": []}
@@ -623,7 +632,10 @@ class terrariumArea(object):
         if on and power_on_time > 0.0:
             log_line += f" and switch back to state off after {power_on_time} seconds"
             self.state[part]["timer_on"] = True
-            threading.Timer(power_on_time, self.relays_toggle, [part, False]).start()
+            # A daemon, so a pending off does not keep a stopped engine's process alive for up to 25 minutes
+            timer = threading.Timer(power_on_time, self.relays_toggle, [part, False])
+            timer.daemon = True
+            timer.start()
 
         logger.info(f"{log_line}.")
 

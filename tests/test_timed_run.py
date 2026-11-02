@@ -51,6 +51,22 @@ def make_area(db, name, setup):
         db.Area(id=f"area-{name}", enclosure=enclosure, name=name, type="lights", mode="timer", setup=setup)
 
 
+class Hardware:
+    """A relay: as terrariumRelay, set_state says whether the state changed. `switch` is the hardware's answer."""
+
+    def __init__(self, is_dimmer=False):
+        self.is_dimmer = is_dimmer
+        self.state = OFF
+        self.switch = mock.MagicMock(return_value=True)
+        self.set_state = mock.MagicMock(side_effect=self._set_state)
+
+    def _set_state(self, value):
+        if self.state == value or not self.switch(value):
+            return False
+        self.state = value
+        return True
+
+
 def make_engine(*relay_ids, dimmers=()):
     engine = terrariumEngine.terrariumEngine.__new__(terrariumEngine.terrariumEngine)
     engine._terrariumEngine__timed_runs = {}
@@ -58,9 +74,7 @@ def make_engine(*relay_ids, dimmers=()):
     engine._terrariumEngine__stopping = False
     engine.relays = {}
     for relay_id in relay_ids:
-        engine.relays[relay_id] = SimpleNamespace(
-            set_state=mock.MagicMock(return_value=True), is_dimmer=relay_id in dimmers
-        )
+        engine.relays[relay_id] = Hardware(relay_id in dimmers)
     return engine
 
 
@@ -136,7 +150,7 @@ def test_a_relay_already_on_is_refused(sensor_db, timers):
 
 
 def test_a_failed_switch_on_starts_no_timer(mist, timers):
-    mist.relays["mist"].set_state.return_value = False
+    mist.relays["mist"].switch.return_value = False
     with pytest.raises(ValueError):
         mist.relay_run("mist", 30)
     assert timers == [] and mist._terrariumEngine__timed_runs == {}
@@ -183,7 +197,7 @@ def errors(caplog):
 
 def test_a_failed_hand_off_keeps_the_timer(mist, timers, caplog):
     mist.relay_run("mist", 30)
-    mist.relays["mist"].set_state.return_value = False
+    mist.relays["mist"].switch.return_value = False
     with orm.db_session(), caplog.at_level(logging.ERROR):
         assert mist.toggle_relay(mist_row(), "off") is False
     timers[0].cancel.assert_not_called()
@@ -193,7 +207,7 @@ def test_a_failed_hand_off_keeps_the_timer(mist, timers, caplog):
 
 def test_a_failed_timer_off_retries_three_times_then_logs(mist, timers, caplog):
     mist.relay_run("mist", 30)
-    mist.relays["mist"].set_state.side_effect = lambda value: value == ON
+    mist.relays["mist"].switch.side_effect = lambda value: value == ON
     with caplog.at_level(logging.ERROR):
         timers[0].function()
         for number in (1, 2, 3):
@@ -219,7 +233,7 @@ def test_a_timer_off_that_raises_is_a_failure_and_a_later_success_ends_the_run(m
             raise outcome
         return outcome
 
-    mist.relays["mist"].set_state.side_effect = set_state
+    mist.relays["mist"].switch.side_effect = set_state
     with caplog.at_level(logging.ERROR):
         timers[0].function()
         assert "mist" in runs(mist) and len(timers) == 2
@@ -254,6 +268,31 @@ def test_the_timer_for_a_deleted_relay_does_not_raise(mist, timers, caplog):
     assert runs(mist) == {} and errors(caplog)
 
 
+def test_a_run_ends_quietly_when_an_area_already_switched_the_relay_off(mist, timers, caplog):
+    mist.relay_run("mist", 30)
+    mist.relays["mist"].state = OFF  # an area's forced shutdown got there first
+    with caplog.at_level(logging.ERROR):
+        timers[0].function()
+    assert runs(mist) == {} and len(timers) == 1 and not errors(caplog)
+
+
+def test_off_on_a_relay_already_off_succeeds_and_clears_the_run(mist, timers):
+    mist.relay_run("mist", 30)
+    mist.relays["mist"].state = OFF
+    with orm.db_session():
+        assert mist.toggle_relay(mist_row(), "off") is True
+    timers[0].cancel.assert_called_once()
+    assert runs(mist) == {}
+
+
+def test_relay_in_run_follows_the_run(mist, timers):
+    assert mist.relay_in_run("mist") is False
+    mist.relay_run("mist", 30)
+    assert mist.relay_in_run("mist") is True
+    timers[0].function()
+    assert mist.relay_in_run("mist") is False
+
+
 def test_a_timer_firing_after_engine_stop_does_nothing(mist, timers):
     mist.relay_run("mist", 30)
     mist._stop_timed_runs()
@@ -274,7 +313,7 @@ def test_engine_stop_waits_for_a_timer_that_is_switching_off(mist, timers):
             release.wait(5)
         return True
 
-    mist.relays["mist"].set_state.side_effect = set_state
+    mist.relays["mist"].switch.side_effect = set_state
     firing = threading.Thread(target=timers[0].function)
     firing.start()
     assert inside.wait(5)
@@ -291,7 +330,7 @@ def test_engine_stop_waits_for_a_timer_that_is_switching_off(mist, timers):
 
 def test_a_failed_off_at_engine_stop_is_logged(mist, timers, caplog):
     mist.relay_run("mist", 30)
-    mist.relays["mist"].set_state.return_value = False
+    mist.relays["mist"].switch.return_value = False
     with caplog.at_level(logging.ERROR):
         mist._stop_timed_runs()
     assert errors(caplog) and runs(mist) == {}

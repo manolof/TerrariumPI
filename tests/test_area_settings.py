@@ -2,6 +2,7 @@
 import copy
 import datetime
 import json
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -11,6 +12,7 @@ from pony import orm
 
 import terrariumArea
 import terrariumEnclosure
+import terrariumEngine
 from terrariumDatabase import Relay, Sensor
 
 LIVE_AREAS = {
@@ -63,6 +65,11 @@ class FakeRelay:
         self.calls.append((value, kwargs))
         self.state = value
         return True
+
+    def set_state(self, value):
+        changed = self.state != value
+        self.state = value
+        return changed
 
 
 @pytest.fixture(autouse=True)
@@ -136,6 +143,7 @@ def home(sensor_db):
         weather=weather(),
         units={"temperature": "C", "humidity": "%"},
         notification=mock.MagicMock(),
+        relay_in_run=lambda relay_id: False,
     )
     enclosure = terrariumEnclosure.terrariumEnclosure("e1", "Home", engine)
     # Lights first, as terrariumEnclosure.load_areas does
@@ -376,6 +384,82 @@ def test_mist_starts_below_the_low_limit_and_runs_for_its_run_time(home, timer):
 
     assert home.relays[MIST].is_on()
     timer.assert_called_once_with(25.0, home.areas["Sprinklers"].relays_toggle, ["low", False])
+
+
+def test_the_off_timer_of_a_run_time_is_a_daemon(home, timer):
+    # A pending off must not keep a stopped engine's process alive
+    reading(HUMIDITY, 60.0)
+
+    home.areas["Sprinklers"].update()
+
+    assert timer.return_value.daemon is True
+    timer.return_value.start.assert_called_once()
+
+
+@pytest.fixture
+def run(home):
+    """Mist now: a real engine with a 25 s run on the pump, in the Sprinklers area, at an ordinary 77%."""
+    engine = terrariumEngine.terrariumEngine.__new__(terrariumEngine.terrariumEngine)
+    engine._terrariumEngine__timed_runs = {}
+    engine._terrariumEngine__timed_runs_lock = threading.RLock()
+    engine._terrariumEngine__stopping = False
+    engine.relays = home.relays
+    engine.sensors = home.engine.sensors
+    engine.weather = home.engine.weather
+    engine.units = home.engine.units
+    engine.timed_relays = lambda: {MIST}
+    home.enclosure.engine = engine
+
+    with mock.patch.object(terrariumEngine.terrariumRelay, "OFF", FakeRelay.OFF, create=True), mock.patch.object(
+        terrariumEngine.terrariumRelay, "ON", FakeRelay.ON, create=True
+    ):
+        reading(HUMIDITY, 77.0)
+        engine.relay_run(MIST, 25)
+        yield SimpleNamespace(engine=engine, area=home.areas["Sprinklers"], pump=home.relays[MIST])
+
+
+def test_a_run_is_not_switched_off_by_the_area_and_ends_on_time(run, timer):
+    assert timer.call_args.args[0] == 25
+
+    run.area.update()
+    run.area.update()
+
+    assert run.area.state["sensors"]["alarm_high"] is True
+    assert run.pump.is_on()
+
+    timer.call_args.args[1](*timer.call_args.kwargs["args"])
+
+    assert run.pump.is_off()
+    assert run.engine.relay_in_run(MIST) is False
+
+
+def test_the_area_switches_off_again_once_the_run_is_over(run):
+    run.engine.relay_run_stop(MIST)  # the run is gone, the relay is still on
+
+    run.area.update()
+
+    assert run.pump.is_off()
+
+
+def test_a_forced_shutdown_for_a_sensor_error_wins_over_a_run(run):
+    run.area.update()
+    assert run.pump.is_on()
+    no_reading(HUMIDITY)
+
+    run.area.update()
+
+    assert run.area.state["sensors"]["all_error"] is True
+    assert run.pump.is_off()
+
+
+def test_a_hand_off_wins_over_a_run(run):
+    with orm.db_session():
+        assert run.engine.toggle_relay(Relay[MIST], "off") is True
+
+    run.area.update()
+
+    assert run.pump.is_off()
+    assert run.engine.relay_in_run(MIST) is False
 
 
 # --- Lights ---

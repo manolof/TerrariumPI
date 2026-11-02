@@ -57,6 +57,19 @@ def test_update_leaves_the_relays_alone_without_weather(mode):
     assert area.state["day"]["powered"] is True
 
 
+def test_the_repeating_warning_goes_to_the_logger_that_does_not_notify(caplog):
+    area = make_area("weather")
+    area.is_day = True
+    area._apply_night_shift = lambda: None
+    area.relays_state = lambda part, state=True: True
+
+    with caplog.at_level(logging.WARNING):
+        Area.update(area)
+
+    warnings = [r for r in caplog.records if "No weather data" in r.getMessage()]
+    assert warnings and {r.name for r in warnings} == {"terrariumWeatherRetry"}
+
+
 def test_a_main_lights_area_without_a_timetable_does_not_break_the_follower():
     main = SimpleNamespace(setup={"day": {}, "night": {}}, state={"day": {}, "night": {}})
     follower = make_area("main_lights", main_lights=main)

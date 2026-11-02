@@ -1105,9 +1105,17 @@ class terrariumEngine(object):
             timer.cancel()
             relayLogger.info(f"Cancelled the timed run of relay {relay_id}.")
 
+    def relay_in_run(self, relay_id: str) -> bool:
+        """True while a relay has a timed run. Read without the lock: an area update must not wait on a switch."""
+        return relay_id in self.__timed_runs
+
     def __relay_off(self, relay_id: str) -> bool:
+        # True when the relay is off afterwards. set_state only says whether it changed, so a relay that was
+        # already off (an area can get there first) would look like a failure.
         try:
-            return bool(self.relays[relay_id].set_state(terrariumRelay.OFF))
+            relay = self.relays[relay_id]
+            relay.set_state(terrariumRelay.OFF)
+            return relay.state == terrariumRelay.OFF
         except Exception as ex:
             relayLogger.error(f"Error switching off relay {relay_id}: {ex}.")
             return False
@@ -1170,7 +1178,7 @@ class terrariumEngine(object):
 
         if action == terrariumRelay.OFF:
             # Off: the run is only ended when the relay is confirmed off. Otherwise the timer stays, to try again.
-            ok = self.relays[relay.id].set_state(action)
+            ok = self.__relay_off(relay.id)
             if ok:
                 self.relay_run_stop(relay.id)
             elif relay.id in self.__timed_runs:
@@ -1408,28 +1416,36 @@ class terrariumEngine(object):
             )
             start = time.time()
 
-            # Weather data
-            self._retry_weather()
-            if self.weather is not None:
-                self.weather.update()
+            # One failing step must not end this thread: nothing else switches the relays
+            try:
+                # Separate, so a weather fault can not cost every round its sensor and area updates
+                try:
+                    # Weather data
+                    self._retry_weather()
+                    if self.weather is not None:
+                        self.weather.update()
 
-            # System stats (needs weather update)
-            self.webserver.websocket_message("systemstats", self.system_stats())
+                    # System stats (needs weather update)
+                    self.webserver.websocket_message("systemstats", self.system_stats())
+                except Exception:
+                    logger.exception("The weather or system stats update of this round failed.")
 
-            # Run updates in parallel and wait till all done
-            with futures.ThreadPoolExecutor() as pool:
-                pool.submit(self._update_sensors)
-                pool.submit(self._update_relays)
-                pool.submit(self._update_webcams)
-                pool.submit(self.__update_checker)
+                # Run updates in parallel and wait till all done
+                with futures.ThreadPoolExecutor() as pool:
+                    pool.submit(self._update_sensors)
+                    pool.submit(self._update_relays)
+                    pool.submit(self._update_webcams)
+                    pool.submit(self.__update_checker)
 
-            # Run encounter/environment updates
-            self._update_enclosures()
+                # Run encounter/environment updates
+                self._update_enclosures()
 
-            self.motd()
+                self.motd()
 
-            # Cleanup hanging bluetooth helper scripts....
-            terrariumUtils.kill_bluetooth_helper_processes()
+                # Cleanup hanging bluetooth helper scripts....
+                terrariumUtils.kill_bluetooth_helper_processes()
+            except Exception:
+                logger.exception("An engine update round failed. The next round goes on as normal.")
 
             duration = time.time() - start
             time_left = terrariumEngine.__ENGINE_LOOP_TIMEOUT - duration

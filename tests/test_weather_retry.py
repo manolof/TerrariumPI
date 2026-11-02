@@ -141,6 +141,7 @@ def make_lights():
     area._apply_night_shift = lambda: None
     area.relays_state = lambda part, state=True: False
     area.relays_toggle = mock.Mock()
+    area._period_in_run = lambda period: False
     area.current_value = lambda sensors: {}
     area._time_table = lambda: Area._time_table(area)
     area._is_timer_time = lambda period: Area._is_timer_time(area, period)
