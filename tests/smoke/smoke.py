@@ -53,8 +53,19 @@ LOG_TAIL_LINES = 80
 # Programs and modules the Pi needs at run time. Run in the image itself, before the engine starts.
 COMMANDS = ["rpicam-vid", "ffmpeg", "pigpiod", "pigs", "pgrep", "nc"]
 # The Pi runs the legacy camera stack (start_x=1 in its boot config): rpicam-vid finds no camera there, and
-# rpilive_webcam.sh prefers raspivid. The engine looks for it at exactly /usr/bin/raspivid.
-RASPIVID_CHECK = "command -v raspivid || echo 'raspivid: not found'; ldd /usr/bin/raspivid"
+# rpilive_webcam.sh prefers raspivid. /usr/bin/raspivid is a wrapper: the real binary and its libraries came from
+# the old image (Dockerfile.ludwig, stage legacy_camera), and only that process gets them.
+RASPIVID_CHECK = (
+    "command -v raspivid || echo 'raspivid: not found'; "
+    "LD_LIBRARY_PATH=/opt/legacy-camera/lib ldd /opt/legacy-camera/raspivid"
+)
+RASPIVID_HELP = "raspivid --help"
+# What the loader, or the wrapper failing to start the binary, says. Anything else is the program itself running.
+# Without a camera it may stop on that (no /dev/vchiq here): that is not what this step checks.
+LOADER_ERROR = re.compile(
+    r"error while loading shared libraries|cannot open shared object|symbol lookup error|undefined symbol"
+    r"|version `[^']+' not found|Exec format error"
+)
 IMPORT_CHECK = """
 import importlib, importlib.util, sys
 bad = 0
@@ -102,6 +113,14 @@ def raspivid_problems(returncode, output):
     problems = [line.strip() for line in output.splitlines() if "not found" in line]
     if returncode != 0 and not problems:
         problems.append(f"ldd exit code {returncode}")
+    return problems
+
+
+def raspivid_help_problems(returncode, output):
+    """Loader errors in the output of RASPIVID_HELP. A camera error, or the exit code it gives, does not count."""
+    problems = [line.strip() for line in output.splitlines() if LOADER_ERROR.search(line)]
+    if returncode in (126, 127) and not problems:
+        problems.append(f"raspivid could not start, exit code {returncode}")
     return problems
 
 
@@ -249,6 +268,16 @@ def main():
         print(raspivid.stdout.strip(), raspivid.stderr.strip()[-2000:], flush=True)
         problems = raspivid_problems(raspivid.returncode, raspivid.stdout + raspivid.stderr)
         record("raspivid is in the image with all its libraries", not problems, "; ".join(problems))
+        raspivid_help = run(
+            ["docker", "run", "--rm", "--platform", args.platform, "--entrypoint", "/bin/sh", args.image,
+             "-c", RASPIVID_HELP],
+            check=False,
+            timeout=timeout,
+        )
+        print(raspivid_help.stdout.strip(), raspivid_help.stderr.strip()[-2000:], flush=True)
+        print(f"raspivid --help exit code {raspivid_help.returncode}", flush=True)
+        problems = raspivid_help_problems(raspivid_help.returncode, raspivid_help.stdout + raspivid_help.stderr)
+        record("raspivid starts through its wrapper", not problems, "; ".join(problems))
         imports = run(
             ["docker", "run", "--rm", "--platform", args.platform, "--entrypoint", "/opt/venv/bin/python",
              args.image, "-c", IMPORT_CHECK],

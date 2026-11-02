@@ -1,6 +1,7 @@
 # Slim image for Ludwig's enclosure. Derived from Dockerfile.bookworm.
 # Removed: the sispmctl build, the 3rdparty libraries and their patches, bluez,
 # lxml/ALSA build libraries, ftdi, sudo, the Java option.
+# Added: raspivid from the old image, see the legacy_camera stage.
 # Built by .github/workflows/ludwig-image.yml:
 # docker buildx build --platform linux/arm/v7 -f Dockerfile.ludwig -t ghcr.io/manolof/terrariumpi:ludwig-<sha> .
 
@@ -48,6 +49,41 @@ WORKDIR /TerrariumPI
 COPY . .
 RUN rm -Rf .git .github .venv 3rdparty gui docs screenshots tests package*.json postcss.config.* rollup.config.js .env.* html-template.js requirements.txt yarn.lock
 
+# The legacy camera tool, carried over from the image it works in. The Pi runs the legacy camera stack (start_x=1 in
+# its boot config): rpicam-vid finds no camera there, and bookworm packages have no raspivid. This stage only gives
+# files: RUN does not go through the image's ENTRYPOINT, so its run.sh and CMD never run.
+# Collected: the binary, the userland libraries by name (some are loaded by name at run time, so ldd alone misses
+# them), then whatever those need, until nothing new turns up. glibc and libm stay out: they come from the final image.
+FROM theyosh/terrariumpi:4.16.0-buster AS legacy_camera
+RUN set -eu; \
+    out=/opt/legacy-camera; \
+    mkdir -p "$out/lib"; \
+    cp -L /usr/bin/raspivid "$out/raspivid"; \
+    for dir in /opt/vc/lib /usr/lib/arm-linux-gnueabihf; do \
+      for name in libmmal libbcm_host libvcos libvchiq_arm libvcsm libcontainers; do \
+        for lib in "$dir/$name"*.so*; do \
+          if [ -f "$lib" ] && [ ! -e "$out/lib/${lib##*/}" ]; then cp -L "$lib" "$out/lib/"; fi; \
+        done; \
+      done; \
+    done; \
+    count=-1; \
+    while [ "$count" != "$(ls "$out/lib" | wc -l)" ]; do \
+      count="$(ls "$out/lib" | wc -l)"; \
+      for file in "$out/raspivid" "$out/lib/"*; do \
+        LD_LIBRARY_PATH="$out/lib" ldd "$file" | awk '$2 == "=>" && $3 ~ /^\// {print $3}' | while read -r lib; do \
+          case "${lib##*/}" in \
+            ld-linux*|libc.so*|libm.so*|libdl.so*|libpthread.so*|librt.so*|libresolv.so*|libnsl.so*|libutil.so*) ;; \
+            *) if [ ! -e "$out/lib/${lib##*/}" ]; then cp -L "$lib" "$out/lib/"; fi ;; \
+          esac; \
+        done; \
+      done; \
+    done; \
+    ls -l "$out/lib"; \
+    LD_LIBRARY_PATH="$out/lib" ldd "$out/raspivid"; \
+    test -e "$out/lib/libmmal_core.so"; \
+    test -e "$out/lib/libbcm_host.so"; \
+    if LD_LIBRARY_PATH="$out/lib" ldd "$out/raspivid" | grep "not found"; then exit 1; fi
+
 # actual image
 FROM python:3.11-slim-bookworm AS finalimage
 ARG GITHUB_SHA="development"
@@ -66,6 +102,7 @@ ENV PATH="/opt/venv/bin:$PATH"
 COPY --from=python_builder /etc/apt /etc/apt
 COPY --from=python_builder /opt/venv /opt/venv
 COPY --from=sourcecode /TerrariumPI /TerrariumPI
+COPY --from=legacy_camera /opt/legacy-camera /opt/legacy-camera
 
 # pigpiod: GPIO daemon (run.sh starts it). pigpio-tools: pigs, which the switch steps use to read the dimmer pin.
 # The `pigpio` package would also pull in python3 and the -dev libraries. ffmpeg and rpicam-apps-core (rpicam-vid): camera stream.
@@ -81,6 +118,11 @@ RUN  apt-get -o Acquire::ForceIPv4=true update \
   && rm -rf /var/lib/apt/lists/* \
   && find /var/log/ -type f -delete \
   && find /var/cache/ -type f -delete
+
+# rpilive_webcam.py looks for /usr/bin/raspivid, and rpilive_webcam.sh finds it on the PATH. The old libraries are for
+# this one process only: /opt/legacy-camera/lib is not in the loader's search path, so nothing else picks them up.
+RUN  printf '#!/bin/sh\nLD_LIBRARY_PATH=/opt/legacy-camera/lib exec /opt/legacy-camera/raspivid "$@"\n' > /usr/bin/raspivid \
+  && chmod 755 /usr/bin/raspivid
 
 WORKDIR /TerrariumPI
 # Set git version in a temp file
