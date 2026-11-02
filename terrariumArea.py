@@ -511,7 +511,15 @@ class terrariumArea(object):
                     other_alarm = self.state["sensors"][f'alarm_{("low" if period == "high" else "high")}']
                     toggle_relay = False if other_alarm else None
 
-            if toggle_relay is True and not self.relays_state(period):
+            # A real high alarm: the high limit itself, not the ordinary reading an ignore_high area counts as one
+            real_high = (
+                "sensors" == self.mode
+                and "low" == period
+                and not self.ignore_high_alarm
+                and self.state["sensors"]["alarm_high"] is True
+            )
+
+            if toggle_relay is True and not real_high and not self.relays_state(period):
                 time_elapsed = abs(int(datetime.datetime.now().timestamp()) - self.state[period]["last_powered_on"])
                 # Extra weather check / backup
                 if self.mode in ["weather", "weather_inverse"] and time_elapsed < (15 * 60):
@@ -550,6 +558,16 @@ class terrariumArea(object):
                 and not self._period_in_run(period)
             ):
                 self.relays_toggle(period, False)
+
+            elif toggle_relay is False and real_high and not self.relays_state(period, False):
+                # Above the high limit: off now, also in the middle of a timed run. The settle time counts from here.
+                logger.info(f"Relays for {self} period {period} are switched off: the temperature is above the high limit.")
+                self.relays_toggle(period, False)
+                if self.relays_state(period, False):
+                    # A run from relay_run is over too, so its timer can not cut a later run or log a false error
+                    for relay in self.setup[period]["relays"]:
+                        if self.enclosure.engine.relay_in_run(relay):
+                            self.enclosure.engine.relay_run_stop(relay)
 
             self.state[period]["powered"] = self.relays_state(period)
 
@@ -629,12 +647,19 @@ class terrariumArea(object):
     def relays_toggle(self, part, on) -> None:
         log_line = f'Toggle the relays for area {self} part {part} to state {("on" if on else "off")}'
         power_on_time = self.setup[part].get("power_on_time", 0.0)
+        # The pending off of an earlier run is void now: it must not cut a later run short
+        timers = self.__dict__.setdefault("_off_timers", {})
+        pending = timers.pop(part, None)
+        if pending is not None:
+            pending.cancel()
+
         if on and power_on_time > 0.0:
             log_line += f" and switch back to state off after {power_on_time} seconds"
             self.state[part]["timer_on"] = True
             # A daemon, so a pending off does not keep a stopped engine's process alive for up to 25 minutes
             timer = threading.Timer(power_on_time, self.relays_toggle, [part, False])
             timer.daemon = True
+            timers[part] = timer
             timer.start()
 
         logger.info(f"{log_line}.")

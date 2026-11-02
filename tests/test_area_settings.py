@@ -144,6 +144,7 @@ def home(sensor_db):
         units={"temperature": "C", "humidity": "%"},
         notification=mock.MagicMock(),
         relay_in_run=lambda relay_id: False,
+        relay_run_stop=mock.MagicMock(),
     )
     enclosure = terrariumEnclosure.terrariumEnclosure("e1", "Home", engine)
     # Lights first, as terrariumEnclosure.load_areas does
@@ -339,19 +340,160 @@ def test_a_running_heat_relay_stops_above_the_high_limit(home):
     assert home.areas["Heat"].state["low"]["powered"] is False
 
 
-def test_a_heat_run_on_its_run_time_goes_on_above_the_high_limit_until_the_timer_ends(home):
-    # Existing behaviour, kept: the high limit stops a relay only when no run time is counting
+@pytest.mark.parametrize("is_day, low, high", [(True, 21.0, 28.1), (False, 19.0, 26.1)])
+def test_a_heat_run_on_its_run_time_stops_above_the_high_limit(home, is_day, low, high):
+    with mock.patch.object(terrariumArea.terrariumArea, "is_day", new=is_day):
+        reading(TEMPERATURE, low)
+        home.areas["Heat"].update()
+        assert home.relays[HEAT].is_on()
+        assert home.areas["Heat"].state["low"]["timer_on"] is True
+
+        reading(TEMPERATURE, high)
+        home.areas["Heat"].update()
+
+    assert home.areas["Heat"].state["sensors"]["alarm_high"] is True
+    assert home.relays[HEAT].is_off()
+    assert home.areas["Heat"].state["low"]["timer_on"] is False
+    assert home.areas["Heat"].state["low"]["powered"] is False
+
+
+def test_a_heat_run_goes_on_just_below_the_high_limit(home):
     reading(TEMPERATURE, 21.0)
     home.areas["Heat"].update()
-    assert home.relays[HEAT].is_on()
 
-    reading(TEMPERATURE, 35.0)
+    reading(TEMPERATURE, 27.9)
     home.areas["Heat"].update()
-    assert home.areas["Heat"].state["sensors"]["alarm_high"] is True
+
+    assert home.relays[HEAT].is_on()
+    assert home.areas["Heat"].state["low"]["timer_on"] is True
+
+
+def test_heat_does_not_start_above_the_high_limit(home):
+    reading(TEMPERATURE, 28.5)
+
+    home.areas["Heat"].update()
+
+    assert home.relays[HEAT].calls == []
+
+
+class FakeTimer:
+    made = []
+
+    def __init__(self, delay, function, args=()):
+        self.function, self.args, self.cancelled, self.daemon = function, args, False, False
+        FakeTimer.made.append(self)
+
+    def start(self):
+        pass
+
+    def cancel(self):
+        self.cancelled = True
+
+    def fire(self):
+        # A real timer does nothing once cancelled
+        if not self.cancelled:
+            self.function(*self.args)
+
+
+def test_the_old_timer_of_a_stopped_heat_run_cannot_cut_a_later_run(home):
+    FakeTimer.made = []
+    heat = home.areas["Heat"]
+    with mock.patch.object(terrariumArea.threading, "Timer", FakeTimer):
+        reading(TEMPERATURE, 21.0)
+        heat.update()
+        old = FakeTimer.made[-1]
+
+        reading(TEMPERATURE, 29.0)
+        heat.update()
+        assert home.relays[HEAT].is_off()
+        assert old.cancelled is True
+
+        # The settle time has passed and it is cold again: a new run starts
+        heat.state["low"]["last_powered_on"] = int(datetime.datetime.now().timestamp()) - 400
+        reading(TEMPERATURE, 21.0)
+        heat.update()
+        assert home.relays[HEAT].is_on()
+
+        old.fire()
+        assert home.relays[HEAT].is_on()
+        assert heat.state["low"]["timer_on"] is True
+        FakeTimer.made[-1].fire()
+        assert home.relays[HEAT].is_off()
+
+
+def test_the_settle_time_counts_after_the_high_stop(home):
+    heat = home.areas["Heat"]
+    reading(TEMPERATURE, 21.0)
+    heat.update()
+    reading(TEMPERATURE, 29.0)
+    heat.update()
+    assert home.relays[HEAT].is_off()
+    calls = len(home.relays[HEAT].calls)
+
+    reading(TEMPERATURE, 21.0)
+    heat.update()
+
+    assert len(home.relays[HEAT].calls) == calls
+    assert abs(heat.state["low"]["last_powered_on"] - int(datetime.datetime.now().timestamp())) <= 2
+
+
+def test_a_relay_run_on_heat_stops_at_the_high_limit(home):
+    heat = home.areas["Heat"]
+    stopped = []
+    home.engine.relay_in_run = lambda relay_id: relay_id == HEAT and not stopped
+    home.engine.relay_run_stop = lambda relay_id: stopped.append(relay_id)
+    home.relays[HEAT].state = FakeRelay.ON
+    reading(TEMPERATURE, 27.0)
+    heat.update()
     assert home.relays[HEAT].is_on()
 
-    home.areas["Heat"].relays_toggle("low", False)
+    reading(TEMPERATURE, 28.1)
+    heat.update()
+
     assert home.relays[HEAT].is_off()
+    assert stopped == [HEAT]
+
+
+def test_a_relay_run_that_could_not_be_stopped_keeps_its_timer(home):
+    stopped = []
+    home.engine.relay_in_run = lambda relay_id: True
+    home.engine.relay_run_stop = lambda relay_id: stopped.append(relay_id)
+    home.relays[HEAT].state = FakeRelay.ON
+    home.relays[HEAT].on = lambda value, **kwargs: True  # the switch does not work
+    reading(TEMPERATURE, 29.0)
+
+    home.areas["Heat"].update()
+
+    assert home.relays[HEAT].is_on()
+    assert stopped == []
+
+
+def test_a_real_relay_run_on_heat_ends_cleanly_after_the_high_stop(home, caplog):
+    engine = terrariumEngine.terrariumEngine.__new__(terrariumEngine.terrariumEngine)
+    engine._terrariumEngine__timed_runs = {}
+    engine._terrariumEngine__timed_runs_lock = threading.RLock()
+    engine._terrariumEngine__stopping = False
+    engine.relays = home.relays
+    engine.sensors = home.engine.sensors
+    engine.weather = home.engine.weather
+    engine.units = home.engine.units
+    engine.timed_relays = lambda: {HEAT}
+    home.enclosure.engine = engine
+    reading(TEMPERATURE, 27.0)
+
+    with mock.patch.object(terrariumEngine.terrariumRelay, "OFF", FakeRelay.OFF, create=True), mock.patch.object(
+        terrariumEngine.terrariumRelay, "ON", FakeRelay.ON, create=True
+    ), mock.patch.object(terrariumEngine.threading, "Timer") as run_timer:
+        engine.relay_run(HEAT, 60)
+        assert engine.relay_in_run(HEAT) is True
+
+        reading(TEMPERATURE, 28.5)
+        home.areas["Heat"].update()
+
+        assert home.relays[HEAT].is_off()
+        assert engine.relay_in_run(HEAT) is False
+        run_timer.return_value.cancel.assert_called_once()
+    assert "may still be ON" not in caplog.text
 
 
 def test_heat_goes_off_when_every_sensor_fails(home):
@@ -384,6 +526,19 @@ def test_mist_starts_below_the_low_limit_and_runs_for_its_run_time(home, timer):
 
     assert home.relays[MIST].is_on()
     timer.assert_called_once_with(25.0, home.areas["Sprinklers"].relays_toggle, ["low", False])
+
+
+def test_mist_keeps_running_through_its_run_time_at_an_ordinary_humidity(home):
+    reading(HUMIDITY, 60.0)
+    home.areas["Sprinklers"].update()
+    assert home.relays[MIST].is_on()
+
+    reading(HUMIDITY, 77.0)
+    home.areas["Sprinklers"].update()
+
+    assert home.areas["Sprinklers"].state["sensors"]["alarm_high"] is True
+    assert home.relays[MIST].is_on()
+    assert home.areas["Sprinklers"].state["low"]["timer_on"] is True
 
 
 def test_the_off_timer_of_a_run_time_is_a_daemon(home, timer):
