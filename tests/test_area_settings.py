@@ -468,6 +468,70 @@ def test_a_relay_run_that_could_not_be_stopped_keeps_its_timer(home):
     assert stopped == []
 
 
+def test_a_failed_high_stop_keeps_the_run_limit(home):
+    FakeTimer.made = []
+    heat = home.areas["Heat"]
+    with mock.patch.object(terrariumArea.threading, "Timer", FakeTimer):
+        reading(TEMPERATURE, 21.0)
+        heat.update()
+        timer = FakeTimer.made[-1]
+
+        home.relays[HEAT].on = lambda value, **kwargs: True  # the switch does not work
+        reading(TEMPERATURE, 29.0)
+        heat.update()
+        assert home.relays[HEAT].is_on()
+        assert timer.cancelled is False
+        assert heat.state["low"]["timer_on"] is True
+
+        # Back in the band: nothing acts, the timer is the only limit left
+        reading(TEMPERATURE, 25.0)
+        heat.update()
+        assert timer.cancelled is False
+
+        del home.relays[HEAT].on  # the switch works again
+        timer.fire()
+        assert home.relays[HEAT].is_off()
+        assert heat.state["low"]["timer_on"] is False
+
+
+def test_a_timer_that_fired_late_cannot_switch_off_a_newer_run(home):
+    FakeTimer.made = []
+    heat = home.areas["Heat"]
+    with mock.patch.object(terrariumArea.threading, "Timer", FakeTimer):
+        reading(TEMPERATURE, 21.0)
+        heat.update()
+        old = FakeTimer.made[-1]
+        reading(TEMPERATURE, 29.0)
+        heat.update()
+        heat.state["low"]["last_powered_on"] = int(datetime.datetime.now().timestamp()) - 400
+        reading(TEMPERATURE, 21.0)
+        heat.update()
+        new = FakeTimer.made[-1]
+        assert new is not old
+
+        # The old one was already running when it was cancelled
+        old.function(*old.args)
+
+        assert home.relays[HEAT].is_on()
+        assert heat._off_timers["low"] is new
+        assert heat.state["low"]["timer_on"] is True
+
+
+def test_a_humidity_area_without_ignore_high_keeps_its_run_above_the_high_limit(home):
+    mist = home.areas["Sprinklers"]
+    mist.ignore_high_alarm = False
+    reading(HUMIDITY, 60.0)
+    mist.update()
+    assert home.relays[MIST].is_on()
+
+    reading(HUMIDITY, 95.0)
+    mist.update()
+
+    assert mist.state["sensors"]["alarm_high"] is True
+    assert home.relays[MIST].is_on()
+    assert mist.state["low"]["timer_on"] is True
+
+
 def test_a_real_relay_run_on_heat_ends_cleanly_after_the_high_stop(home, caplog):
     engine = terrariumEngine.terrariumEngine.__new__(terrariumEngine.terrariumEngine)
     engine._terrariumEngine__timed_runs = {}

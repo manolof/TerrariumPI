@@ -514,6 +514,7 @@ class terrariumArea(object):
             # A real high alarm: the high limit itself, not the ordinary reading an ignore_high area counts as one
             real_high = (
                 "sensors" == self.mode
+                and "heating" == self.type
                 and "low" == period
                 and not self.ignore_high_alarm
                 and self.state["sensors"]["alarm_high"] is True
@@ -644,14 +645,19 @@ class terrariumArea(object):
 
         return new_state
 
-    def relays_toggle(self, part, on) -> None:
+    def relays_toggle(self, part, on, fired=None) -> None:
+        # fired: the timer that calls this for its run's end. An older timer that fires late does nothing.
         log_line = f'Toggle the relays for area {self} part {part} to state {("on" if on else "off")}'
         power_on_time = self.setup[part].get("power_on_time", 0.0)
-        # The pending off of an earlier run is void now: it must not cut a later run short
         timers = self.__dict__.setdefault("_off_timers", {})
-        pending = timers.pop(part, None)
-        if pending is not None:
-            pending.cancel()
+        if fired is not None and timers.get(part) is not fired:
+            return
+
+        if on:
+            # A new run replaces the pending off of an earlier one: it must not cut this run short
+            pending = timers.pop(part, None)
+            if pending is not None:
+                pending.cancel()
 
         if on and power_on_time > 0.0:
             log_line += f" and switch back to state off after {power_on_time} seconds"
@@ -659,6 +665,7 @@ class terrariumArea(object):
             # A daemon, so a pending off does not keep a stopped engine's process alive for up to 25 minutes
             timer = threading.Timer(power_on_time, self.relays_toggle, [part, False])
             timer.daemon = True
+            timer.args = [part, False, timer]
             timers[part] = timer
             timer.start()
 
@@ -677,7 +684,13 @@ class terrariumArea(object):
 
         if not on:
             self.state[part]["last_powered_on"] = int(datetime.datetime.now().timestamp())
-            self.state[part]["timer_on"] = False
+            if fired is not None or self.relays_state(part, False):
+                # The run is over: the timer's own end, or an off that is confirmed. An off that is not confirmed
+                # keeps the timer, so the run still has its limit.
+                timer = timers.pop(part, None)
+                if timer is not None:
+                    timer.cancel()
+                self.state[part]["timer_on"] = False
 
         self.state[part]["powered"] = on
         self.state["powered"] = self._powered
@@ -862,7 +875,6 @@ class terrariumAreaHeater(terrariumArea):
             else:
                 logger.info(f"Set the relay {relay} to {relay.OFF} with 0 seconds delay")
                 self.enclosure.relays[f"{relay.id}"].on(relay.OFF)
-                self.state[part]["timer_on"] = False
 
 
 class terrariumAreaHumidity(terrariumAreaHeater):

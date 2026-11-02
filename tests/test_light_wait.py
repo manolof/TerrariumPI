@@ -13,6 +13,7 @@ def _self(mode):
         setup={"day": {"relays": ["r1"]}},
         enclosure=SimpleNamespace(relays={"r1": relay}),
         _powered=True,
+        relays_state=lambda part, state=True: True,
     )
 
 
