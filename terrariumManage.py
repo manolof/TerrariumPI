@@ -1059,6 +1059,15 @@ class terrariumManage(object):
 
         return False
 
+    @staticmethod
+    def _address_taken(entity, address, own_id=None) -> bool:
+        """Whether another device of the same kind has this address. Two devices on one address would share one
+        hardware object (the driver cache key is hardware plus address), so switching one would drive the other."""
+        wanted = address.strip().casefold()
+        return any(
+            row.id != own_id and str(row.address).strip().casefold() == wanted for row in entity.select()
+        )
+
     @classmethod
     def _used_by(cls, kind, device_id):
         names = sorted(area.name for area in Area.select() if cls._area_uses(area.setup, kind, device_id))
@@ -1086,6 +1095,9 @@ class terrariumManage(object):
         except ManageError as ex:
             raise HTTPError(status=400, body=str(ex))
 
+        if self._address_taken(entity, address):
+            raise HTTPError(status=409, body="Another device already uses that address.")
+
         # The hardware type checks its own address when the device is built, as the classic add does
         engine = self.webserver.engine
         try:
@@ -1093,7 +1105,7 @@ class terrariumManage(object):
                 device = terrariumSensor(None, body["hardware"], body["type"], address, name)
             else:
                 device = terrariumRelay(
-                    None, body["hardware"], address, name, None, callback=getattr(engine, "callback_relay", None)
+                    None, body["hardware"], address, name, {}, callback=getattr(engine, "callback_relay", None)
                 )
         except Exception:
             logger.exception("Could not set up a new device")
@@ -1151,6 +1163,9 @@ class terrariumManage(object):
             area = self._used_by(kind, row.id)
             if area is not None:
                 raise HTTPError(status=409, body=f"This device is used by the area {area}.")
+
+            if self._address_taken(entity, changes["address"], row.id):
+                raise HTTPError(status=409, body="Another device already uses that address.")
 
         row.set(**changes)
         orm.commit()

@@ -1,4 +1,5 @@
 """/api/manage/devices/ with the real Pony in-memory database and fake hardware classes."""
+import sys
 from types import SimpleNamespace
 from unittest import mock
 
@@ -52,6 +53,8 @@ def fake_relay_class(created):
         def __init__(self, relay_id, hardware, address, name="", calibration=None, prev_state=None, callback=None):
             if address == "bad":
                 raise ValueError("no relay at bad")
+            calibration.get("inverse", False)  # like the real drivers: None is an error
+            self.calibration = calibration
             self.id = "relay-" + address
             self.hardware = hardware
             self.address = address
@@ -277,8 +280,34 @@ def test_add_twice_is_409(manage, engine, sensor_db):
     call(manage, "device_add", GOOD_SENSOR, "sensors")
     err = fail(manage, "device_add", GOOD_SENSOR, "sensors")
     assert err.status == 409
-    assert err.body == "This device is already added."
+    assert err.body == "Another device already uses that address."
     assert engine.add.call_count == 1
+
+
+def test_add_relay_passes_a_calibration_dict(manage, created, sensor_db):
+    call(manage, "device_add", {"hardware": "gpio", "name": "Fogger", "address": "12"}, "relays")
+    assert created[0].calibration == {}
+
+
+def test_add_real_gpio_relay(real_hardware, engine, sensor_db):  # noqa: F811
+    """The real gpio driver, built as the route builds it. gpiozero is a stub, so no pin is driven."""
+    relay_class = real_hardware.relay
+    utils = sys.modules["terrariumUtils"].terrariumUtils
+    with mock.patch.object(terrariumManage, "HTTPError", FakeHTTPError), mock.patch.object(
+        terrariumManage, "terrariumRelay", relay_class
+    ), mock.patch.object(utils, "clean_address", lambda value: str(value), create=True), mock.patch.object(
+        utils, "is_true", lambda value: bool(value), create=True
+    ), mock.patch.object(
+        utils, "to_BCM_port_number", lambda value: int(value), create=True
+    ), mock.patch.object(
+        relay_class, "load_hardware", lambda self: setattr(self, "_loaded", self._load_hardware())
+    ):
+        manage = terrariumManage.terrariumManage(SimpleNamespace(engine=engine))
+        result = call(manage, "device_add", {"hardware": "gpio", "name": "Fogger", "address": "12"}, "relays")
+
+    assert result["hardware"] == "gpio" and result["name"] == "Fogger" and result["address"] == "12"
+    with orm.db_session():
+        assert Relay.exists(id=result["id"])
 
 
 def test_add_engine_failure_is_500(manage, engine, sensor_db):
@@ -345,6 +374,36 @@ def test_put_address_of_unused_device_allowed(manage, engine, house):
     result = call(manage, "device_put", {"address": "18"}, "relays", "spare-relay")
     assert result["address"] == "18"
     engine.update.assert_called_once()
+
+
+def test_put_address_of_another_device_refused(manage, engine, house):
+    err = fail(manage, "device_put", {"address": "5"}, "relays", "spare-relay")
+    assert err.status == 409
+    assert err.body == "Another device already uses that address."
+    assert fail(manage, "device_put", {"address": " 5 "}, "relays", "spare-relay").status == 409
+    engine.update.assert_not_called()
+    with orm.db_session():
+        assert Relay["spare-relay"].address == "8"
+
+
+def test_put_address_compare_is_per_kind(manage, house):
+    # Sensor "spare" has address 3; a relay may use 3
+    assert call(manage, "device_put", {"address": "3"}, "relays", "spare-relay")["address"] == "3"
+
+
+def test_put_own_address_is_fine(manage, engine, house):
+    assert call(manage, "device_put", {"name": "New", "address": "8"}, "relays", "spare-relay")["name"] == "New"
+
+
+def test_add_other_hardware_at_taken_address_refused(manage, engine, house):
+    with orm.db_session():
+        Relay["heat"].address = "GPIO-5"
+    err = fail(manage, "device_add", {"hardware": "gpio", "name": "Twin", "address": " gpio-5 "}, "relays")
+    assert err.status == 409
+    assert err.body == "Another device already uses that address."
+    engine.add.assert_not_called()
+    with orm.db_session():
+        assert Relay.select().count() == 4
 
 
 def test_put_name_rules(manage, house):
