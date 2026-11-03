@@ -761,8 +761,9 @@ class terrariumEngine(object):
         try:
             out = bool(sensor_data.get("alarm")) or bool(sensor_data.get("error"))
             enabled = bool(sensor_data.get("notification", True))
-            result = self.alerts.update(sensor_data["id"], out, enabled)
-            if result is None or not self.alerts.settings["mail"]["alerts"]:
+            # With the alert mails off nothing is mailed, so the tracker must not count an alarm as sent
+            result = self.alerts.update(sensor_data["id"], out, enabled and self.alerts.settings["mail"]["alerts"])
+            if result is None:
                 return
 
             message_data = copy.copy(sensor_data)

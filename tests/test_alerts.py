@@ -312,6 +312,27 @@ def test_engine_sends_no_alert_mail_when_alert_mails_are_off(sensor_db, clock):
     assert sent(engine, "sensor_alarm") == []
 
 
+def test_alert_mail_switched_on_mid_alarm_sends_at_once(sensor_db, clock):
+    # 40 minutes of alarm with the switch off: nothing mailed, so nothing counts as sent
+    engine = make_engine(clock, [35.0] * 200)
+    engine.alerts.settings["mail"]["alerts"] = False
+    run_engine(engine, clock, 80)
+    assert sent(engine, "sensor_alarm") == []
+
+    engine.alerts.reload({**engine.alerts.settings, "mail": {**engine.alerts.settings["mail"], "alerts": True}})
+    with mock.patch.object(terrariumEngine, "sleep"):
+        clock.at(80 * STEP)
+        engine._update_sensors()
+    assert len(sent(engine, "sensor_alarm")) == 1
+
+
+def test_no_recovery_mail_when_no_alarm_mail_was_sent(sensor_db, clock):
+    engine = make_engine(clock, [35.0] * 80 + [24.0] * 30)
+    engine.alerts.settings["mail"]["alerts"] = False
+    run_engine(engine, clock, 110)
+    assert sent(engine, "sensor_alarm") == [] and sent(engine, "sensor_recovered") == []
+
+
 def test_engine_reads_the_settings_row_at_start(sensor_db):
     engine = terrariumEngine.terrariumEngine.__new__(terrariumEngine.terrariumEngine)
     engine._load_alerts()
