@@ -4,6 +4,7 @@ Every test runs on a fake clock and never sleeps. The engine updates a sensor ab
 """
 import json
 import logging
+import time
 from unittest import mock
 
 import pytest
@@ -211,6 +212,16 @@ def test_quiet_errors_one_per_kind_per_quiet_time(clock):
         ("round", 120 * MIN),
         ("weather", 120 * MIN),
     ]
+
+
+def test_the_default_clock_is_monotonic(sensor_db):
+    # The Pi has no real-time clock: NTP steps the wall clock after boot
+    assert AlertTracker(settings())._clock is time.monotonic
+    assert QuietErrors(60)._clock is time.monotonic
+    engine = terrariumEngine.terrariumEngine.__new__(terrariumEngine.terrariumEngine)
+    engine._load_alerts()
+    assert engine.alerts._clock is time.monotonic
+    assert engine.quiet_errors._clock is time.monotonic
 
 
 # The engine's real sensor update path

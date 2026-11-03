@@ -97,7 +97,7 @@ def load_alert_settings(raw: Optional[str]) -> dict:
 
 
 class AlertTracker(object):
-    def __init__(self, settings: dict, clock: Callable[[], float] = time.time) -> None:
+    def __init__(self, settings: dict, clock: Callable[[], float] = time.monotonic) -> None:
         self._clock = clock
         self._lock = threading.Lock()
         self._state = {}
@@ -162,7 +162,7 @@ class AlertTracker(object):
 class QuietErrors(object):
     """One error mail per kind, then none of that kind until the quiet time has passed."""
 
-    def __init__(self, quiet_minutes: float, clock: Callable[[], float] = time.time) -> None:
+    def __init__(self, quiet_minutes: float, clock: Callable[[], float] = time.monotonic) -> None:
         self.quiet_minutes = quiet_minutes
         self._clock = clock
         self._lock = threading.Lock()

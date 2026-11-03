@@ -716,7 +716,7 @@ class terrariumEngine(object):
                 reason = "excluded" if sensor.id in self.settings["exclude_ids"] else "already loaded"
                 sensorLogger.debug(f"Ignored sensor {sensor} because it is {reason}.")
 
-    def _load_alerts(self, clock=time.time) -> None:
+    def _load_alerts(self, clock=time.monotonic) -> None:
         raw = None
         with orm.db_session():
             row = Setting.get(id="ludwig_alerts")
