@@ -130,3 +130,66 @@ def test_an_alert_of_an_enabled_sensor_reaches_the_mail_service(notification_mod
     assert send.call_count == 1
     assert send.call_args.args[0] == message_type
     assert send.call_args.args[1] == "Warm side 31 min"
+
+
+def _mail_service(notification_module, service_id="mail-3", enabled=True):
+    from pony import orm
+    from terrariumDatabase import NotificationService
+
+    with orm.db_session():
+        NotificationService(
+            id=service_id,
+            type="email",
+            name="Mail",
+            enabled=enabled,
+            setup={
+                "address": "mail.example",
+                "port": 25,
+                "username": "fake-user",
+                "password": "fake-pass",
+                "sender": "s@example.com",
+                "receiver": "r@example.com",
+            },
+        )
+
+    notification = notification_module.terrariumNotification(ENGINE)
+    notification.load_services()
+    return notification
+
+
+def _sent_with(notification_module, status_code):
+    message = mock.MagicMock()
+    message.send.return_value = types.SimpleNamespace(status_code=status_code)
+    return mock.patch.object(notification_module.emails, "Message", return_value=message), message
+
+
+def test_test_message_sends_one_fixed_mail(notification_module, sensor_db):
+    notification = _mail_service(notification_module)
+    patch, message = _sent_with(notification_module, 250)
+
+    with patch as factory:
+        notification.test_message("mail-3")
+
+    assert factory.call_args.kwargs["subject"] == "TerrariumPI test mail"
+    assert "\n" not in factory.call_args.kwargs["text"] and factory.call_args.kwargs["text"]
+    assert message.send.call_count == 1
+    assert message.send.call_args.kwargs["to"] == ("r@example.com", "r@example.com")
+
+
+def test_test_message_fails_when_the_server_refuses(notification_module, sensor_db):
+    notification = _mail_service(notification_module)
+    patch, message = _sent_with(notification_module, 535)
+
+    with patch, pytest.raises(notification_module.terrariumNotificationServiceException) as err:
+        notification.test_message("mail-3")
+
+    assert "fake-user" not in str(err.value) and "fake-pass" not in str(err.value)
+
+
+def test_test_message_needs_a_loaded_enabled_service(notification_module, sensor_db):
+    notification = _mail_service(notification_module, enabled=False)
+
+    with pytest.raises(notification_module.terrariumNotificationServiceException):
+        notification.test_message("mail-3")
+    with pytest.raises(notification_module.terrariumNotificationServiceException):
+        notification.test_message("never-stored")

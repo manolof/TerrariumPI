@@ -6,6 +6,8 @@ logger = terrariumLogging.logging.getLogger(__name__)
 import json
 import math
 import re
+import time
+import uuid
 import urllib.parse
 
 from pony import orm
@@ -13,7 +15,7 @@ from bottle import request, HTTPError
 
 from terrariumArea import terrariumArea
 from terrariumAlerts import load_alert_settings
-from terrariumDatabase import Area, Sensor, Setting
+from terrariumDatabase import Area, NotificationService, Sensor, Setting
 from terrariumUtils import terrariumUtils
 from hardware.sensor import terrariumSensor
 
@@ -156,8 +158,10 @@ def _light_delay(day: dict, key: str):
 
 
 class terrariumManage(object):
-    def __init__(self, webserver) -> None:
+    def __init__(self, webserver, clock=time.monotonic) -> None:
         self.webserver = webserver
+        self._clock = clock
+        self._last_test_mail = None
 
     def routes(self, bottle_app, auth) -> None:
         bottle_app.route(
@@ -215,6 +219,27 @@ class terrariumManage(object):
             self.location_put,
             apply=auth(),
             name="api:manage_location_put",
+        )
+        bottle_app.route(
+            "/api/manage/email/",
+            "GET",
+            self.email_get,
+            apply=auth(False),
+            name="api:manage_email_get",
+        )
+        bottle_app.route(
+            "/api/manage/email/",
+            "PUT",
+            self.email_put,
+            apply=auth(),
+            name="api:manage_email_put",
+        )
+        bottle_app.route(
+            "/api/manage/email/test/",
+            "POST",
+            self.email_test,
+            apply=auth(),
+            name="api:manage_email_test",
         )
 
     @staticmethod
@@ -667,3 +692,182 @@ class terrariumManage(object):
             raise HTTPError(status=500, body="The location was saved, but the weather source could not be reloaded.")
 
         return self._location_parse(new_address)
+
+    # --- email server and test mail ---
+    EMAIL_ADDRESS = r"^[^@\s,]+@[^@\s,]+\.[^@\s,]+$"
+    EMAIL_FIELDS = {"enabled", "address", "port", "sender", "receivers", "username", "password"}
+
+    @staticmethod
+    def _email_service():
+        return NotificationService.select(lambda ns: ns.type == "email").order_by(NotificationService.id).first()
+
+    @classmethod
+    def _email_body(cls, service) -> dict:
+        """The mail settings. Never holds the username or the password, only whether there is one."""
+        if service is None:
+            return {
+                "enabled": False,
+                "address": "",
+                "port": None,
+                "sender": "",
+                "receivers": [],
+                "username_set": False,
+                "password_set": False,
+            }
+
+        setup = service.setup if isinstance(service.setup, dict) else {}
+        port = setup.get("port")
+        return {
+            "enabled": bool(service.enabled),
+            "address": str(setup.get("address") or ""),
+            "port": port if isinstance(port, int) and not isinstance(port, bool) else None,
+            "sender": str(setup.get("sender") or ""),
+            "receivers": [part.strip() for part in str(setup.get("receiver") or "").split(",") if part.strip()],
+            "username_set": bool(setup.get("username")),
+            "password_set": bool(setup.get("password")),
+        }
+
+    @staticmethod
+    def _mask(message: str, secrets) -> str:
+        for secret in secrets:
+            message = message.replace(secret, "***")
+        return message
+
+    @staticmethod
+    def _email_secrets(service, extra=()) -> list:
+        """Every form of the username and password that could turn up in a message."""
+        secrets = [value for value in extra if isinstance(value, str)]
+        if service is not None:
+            try:
+                plain = service.to_dict()["setup"]
+            except Exception:
+                plain = {}
+            stored = service.setup if isinstance(service.setup, dict) else {}
+            for name in ("username", "password"):
+                secrets.append(plain.get(name))
+                secrets.append(stored.get(name))
+
+        # The longest first, so a secret that holds another one is not left half showing
+        return sorted({secret for secret in secrets if isinstance(secret, str) and secret}, key=len, reverse=True)
+
+    @orm.db_session()
+    def email_get(self):
+        return self._email_body(self._email_service())
+
+    @orm.db_session()
+    def email_put(self):
+        service = self._email_service()
+        old = self._email_body(service)
+        stored = dict(service.setup) if service is not None and isinstance(service.setup, dict) else {}
+        new_secrets = []
+
+        try:
+            body = fields(request.json, self.EMAIL_FIELDS)
+
+            enabled = old["enabled"]
+            if "enabled" in body:
+                if not isinstance(body["enabled"], bool):
+                    raise ManageError("Enabled must be on or off.")
+                enabled = body["enabled"]
+
+            address = old["address"]
+            if "address" in body:
+                address = text("address", body["address"])
+                if re.search(r"\s", address):
+                    raise ManageError("Address must not contain spaces.")
+
+            port = old["port"]
+            if "port" in body:
+                port = integer("port", body["port"], 1, 65535)
+
+            sender = old["sender"]
+            if "sender" in body:
+                sender = body["sender"]
+                if not isinstance(sender, str) or not re.fullmatch(self.EMAIL_ADDRESS, sender.strip()):
+                    raise ManageError("Sender must be one email address.")
+                sender = sender.strip()
+
+            receivers = old["receivers"]
+            if "receivers" in body:
+                receivers = body["receivers"]
+                if not isinstance(receivers, list) or not 1 <= len(receivers) <= 5:
+                    raise ManageError("Receivers must be from 1 to 5 email addresses.")
+                if not all(isinstance(item, str) and re.fullmatch(self.EMAIL_ADDRESS, item.strip()) for item in receivers):
+                    raise ManageError("Each receiver must be one email address.")
+                receivers = [item.strip() for item in receivers]
+
+            # Empty or absent keeps the stored one
+            for name in ("username", "password"):
+                if name in body:
+                    value = body[name]
+                    if not isinstance(value, str):
+                        raise ManageError(f"{_label(name)} must be text.")
+                    if len(value) > 200 or any(ord(char) < 32 or ord(char) == 127 for char in value):
+                        raise ManageError(f"{_label(name)} can not be used.")
+                    if value:
+                        new_secrets.append(value)
+
+            if enabled and (not address or not receivers):
+                raise ManageError("Email needs a server address and a receiver.")
+        except ManageError as ex:
+            raise HTTPError(status=400, body=str(ex))
+
+        if not sender and receivers:
+            sender = re.sub(r"(.*)@(.*)", r"\1+terrariumpi@\2", receivers[0])
+
+        setup = {
+            "address": address,
+            "port": 25 if port is None else port,
+            "username": stored.get("username", ""),
+            "password": stored.get("password", ""),
+            "sender": sender,
+            "receiver": ",".join(receivers),
+        }
+        for name in ("username", "password"):
+            if isinstance(body.get(name), str) and body[name]:
+                setup[name] = body[name]
+
+        # Through the entity, so the hook that encrypts the username and password at rest runs
+        if service is None:
+            service = NotificationService(id=str(uuid.uuid4()), type="email", name="Email", enabled=enabled, setup=setup)
+        else:
+            service.enabled = enabled
+            service.setup = {**stored, **setup}
+        orm.commit()
+
+        notification = self.webserver.engine.notification
+        try:
+            if notification.services.get(service.id) is not None:
+                notification.reload_service(service.id, service.to_dict())
+            elif enabled:
+                notification.load_services()
+        except Exception as ex:
+            secrets = self._email_secrets(service, new_secrets)
+            logger.error(f"Reloading the mail service failed ({type(ex).__name__}): {self._mask(str(ex), secrets)}")
+            raise HTTPError(
+                status=500, body="The mail settings were saved, but the mail service could not be reloaded."
+            ) from None
+
+        return self._email_body(service)
+
+    @orm.db_session()
+    def email_test(self):
+        service = self._email_service()
+        if service is None or not service.enabled:
+            raise HTTPError(status=400, body="Email is off.")
+
+        now = self._clock()
+        if self._last_test_mail is not None and now - self._last_test_mail < 60:
+            raise HTTPError(status=429, body="Wait a minute before the next test mail.")
+
+        # A failed try counts too, so a broken server is not hammered
+        self._last_test_mail = now
+        secrets = self._email_secrets(service)
+
+        try:
+            self.webserver.engine.notification.test_message(service.id)
+        except Exception as ex:
+            logger.error(f"The test mail could not be sent ({type(ex).__name__}): {self._mask(str(ex), secrets)}")
+            raise HTTPError(status=500, body="The test mail could not be sent. See the engine log.") from None
+
+        return {"sent": True}

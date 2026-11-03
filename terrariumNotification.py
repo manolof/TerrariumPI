@@ -287,6 +287,15 @@ class terrariumNotification(terrariumSingleton):
 
         del self.services[service_id]
 
+    def test_message(self, service_id) -> None:
+        """Sends one fixed mail through the loaded email service. Raises when it can not go."""
+        service = self.services.get(service_id)
+        if service is None or not service.enabled:
+            raise terrariumNotificationServiceException("Email is off.")
+
+        if not service.send_message("system_test", "TerrariumPI test mail", "This is a test mail from TerrariumPI."):
+            raise terrariumNotificationServiceException("The test mail was not accepted by the mail server.")
+
     def broadcast(self, subject: str, message, image) -> None:
         for service in self.services.values():
             if service is not None and service.enabled:
@@ -535,6 +544,7 @@ class terrariumNotificationServiceEmail(terrariumNotificationService):
             except FileNotFoundError:
                 pass
 
+        sent = False
         mail_tls_ssl = ["tls", "ssl", None]
         while not len(mail_tls_ssl) == 0:
 
@@ -553,4 +563,7 @@ class terrariumNotificationServiceEmail(terrariumNotificationService):
 
                 if response.status_code == 250:
                     # Mail sent, clear remaining connection types
+                    sent = True
                     mail_tls_ssl = []
+
+        return sent
