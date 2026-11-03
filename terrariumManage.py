@@ -490,8 +490,10 @@ class terrariumManage(object):
         # The same reload as terrariumAPI.area_update: load_setup on the running area. A run in progress keeps its
         # off time (terrariumArea.load_setup keeps _off_timers, the engine's timed runs are not touched), and the new
         # run time counts from the next run.
+        reloaded = False
         try:
-            self.webserver.engine.update(
+            # False means the area is not loaded in its enclosure: the engine stays on the old setup.
+            reloaded = self.webserver.engine.update(
                 terrariumArea,
                 id=area.id,
                 enclosure=area.enclosure.id,
@@ -501,6 +503,9 @@ class terrariumManage(object):
             )
         except Exception:
             logger.exception("Could not reload area after a change")
+            reloaded = False
+
+        if reloaded is False:
             raise HTTPError(status=500, body="The area was saved, but the engine could not reload it.")
 
         return self._area_body(area)

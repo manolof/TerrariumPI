@@ -526,3 +526,13 @@ def test_next_run_after_mist_now_uses_new_time(home):
 
     assert home.relays[MIST].is_on()
     assert Timer.made[-1].interval == 40
+
+
+def test_an_area_the_engine_did_not_reload_is_a_500(home):
+    # engine.update returns False when the area is not loaded in its enclosure
+    with mock.patch.object(home.engine, "update", return_value=False):
+        assert status_of(home, "Heat", {"run_seconds": 1200}) == 500
+    with mock.patch.object(home.engine, "update", return_value=False):
+        with pytest.raises(FakeHTTPError) as err:
+            put(home, "Heat", {"run_seconds": 1300})
+    assert err.value.body == "The area was saved, but the engine could not reload it."
