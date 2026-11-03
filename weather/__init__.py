@@ -15,6 +15,7 @@ logger = terrariumLogging.logging.getLogger("terrariumWeather")
 
 import re
 import time
+import urllib.parse
 from datetime import datetime, timedelta
 from hashlib import md5
 
@@ -208,8 +209,34 @@ class terrariumWeather(object):
     def credits(self):
         return {"text": self._device["credits"], "url": self._device["url"]}
 
+    def _hide_secrets(self, text: str) -> str:
+        """The text without the weather address or any value from its query string (it holds the API key)."""
+        text = str(text)
+        address = str(self.address or "")
+        if address:
+            text = text.replace(address, terrariumUtils.hide_url_secrets(address))
+
+        try:
+            values = [value for _, value in urllib.parse.parse_qsl(urllib.parse.urlsplit(address).query)]
+        except Exception:
+            values = []
+
+        for value in sorted(set(values), key=len, reverse=True):
+            if len(value) > 3:
+                text = text.replace(value, "***")
+
+        # Any other address in the text: the key of an address that is not ours
+        return re.sub(r"(?i)\b(appid|api_?key|key|token|access_token)=[^&\s)'\"]+", r"\1=***", text)
+
     @retry(tries=3, delay=0.5, max_delay=2, logger=logger)
     def update(self) -> None:
+        # The retry logs the text of what is raised here at WARNING, and a request error holds the whole address
+        try:
+            self._update_once()
+        except Exception as ex:
+            raise terrariumWeatherUpdateException(f"{type(ex).__name__}: {self._hide_secrets(ex)}") from None
+
+    def _update_once(self) -> None:
         if (
             self._device["last_update"] is not None
             and (datetime.now() - self._device["last_update"]).total_seconds() < self.__UPDATE_TIMEOUT
