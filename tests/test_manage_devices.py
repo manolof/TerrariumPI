@@ -104,6 +104,8 @@ def manage(engine, created, sensor_db):
         terrariumManage, "terrariumSensor", fake_sensor_class(created)
     ), mock.patch.object(terrariumManage, "terrariumRelay", fake_relay_class(created)), mock.patch.object(
         terrariumManage.terrariumUtils, "clean_address", real_clean_address, create=True
+    ), mock.patch.object(
+        terrariumManage.terrariumUtils, "to_BCM_port_number", real_to_bcm(), create=True
     ):
         yield terrariumManage.terrariumManage(SimpleNamespace(engine=engine))
 
@@ -580,3 +582,62 @@ def test_delete_of_a_relay_that_is_not_off_is_refused(manage, engine, house, sta
 def test_delete_of_a_relay_at_0_is_allowed(manage, engine, house):
     engine.relays["spare-relay"] = SimpleNamespace(state=0)
     assert call(manage, "device_delete", None, "relays", "spare-relay") == {"deleted": "spare-relay"}
+
+
+# --- one GPIO pin, one device, across kinds ---
+def real_to_bcm():
+    """terrariumUtils.to_BCM_port_number from the source, as the drivers call it (terrariumUtils is a stub here)."""
+    import ast
+    from pathlib import Path
+
+    source = (Path(terrariumManage.__file__).parent / "terrariumUtils.py").read_text(encoding="utf-8")
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.FunctionDef) and node.name == "to_BCM_port_number":
+            node.decorator_list = []
+            namespace = {}
+            exec(compile(ast.Module(body=[node], type_ignores=[]), "terrariumUtils.py", "exec"), namespace)
+            return namespace["to_BCM_port_number"]
+    raise AssertionError("to_BCM_port_number not found")
+
+
+@pytest.fixture
+def pins(manage, house):
+    with orm.db_session():
+        # Physical pins 16 and 18 are BCM 23 and 24
+        Sensor(id="tank", hardware="hc-sr04", type="distance", name="Tank", address="16,18")
+    return manage
+
+
+@pytest.mark.parametrize("address", ["16", "18", " 18 "])
+def test_a_gpio_relay_on_a_gpio_sensor_pin_is_refused(pins, engine, address):
+    err = fail(pins, "device_add", {"hardware": "gpio", "name": "Fogger", "address": address}, "relays")
+    assert err.status == 409 and err.body == "Another device already uses that address."
+    engine.add.assert_not_called()
+
+    err = fail(pins, "device_put", {"address": address}, "relays", "spare-relay")
+    assert err.status == 409
+    with orm.db_session():
+        assert Relay["spare-relay"].address == "8"
+
+
+def test_a_dimmer_on_a_gpio_sensor_pin_is_refused(pins):
+    with orm.db_session():
+        Relay["spare-relay"].hardware = "pwm-dimmer"
+    assert fail(pins, "device_put", {"address": "16"}, "relays", "spare-relay").status == 409
+
+
+def test_a_gpio_sensor_on_a_relay_pin_is_refused(pins, engine):
+    # Heat is a gpio relay on physical pin 5
+    err = fail(pins, "device_add", {"hardware": "hc-sr04", "type": "distance", "name": "Tank 2", "address": "22,5"}, "sensors")
+    assert err.status == 409 and err.body == "Another device already uses that address."
+    err = fail(pins, "device_put", {"address": "5,22"}, "sensors", "tank")
+    assert err.status == 409
+    engine.add.assert_not_called()
+
+
+def test_a_free_pin_and_an_i2c_sensor_are_allowed(pins):
+    assert call(pins, "device_add", {"hardware": "gpio", "name": "Fogger", "address": "22"}, "relays")["address"] == "22"
+    # An expander port is not a GPIO pin of the Pi
+    assert call(pins, "device_put", {"address": "pcf8574-16,0x20"}, "relays", "spare-relay")["address"] == "pcf8574-16,0x20"
+    # bme280 is on I2C: its address is not a pin
+    assert call(pins, "device_put", {"address": "7"}, "sensors", "spare")["address"] == "7"

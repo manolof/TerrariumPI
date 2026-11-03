@@ -1104,15 +1104,54 @@ class terrariumManage(object):
 
         return False
 
-    @staticmethod
-    def _address_taken(entity, address, own_id=None) -> bool:
-        """Whether another device of the same kind has this address. Two devices on one address would share one
-        hardware object (the driver cache key is hardware plus address), so switching one would drive the other."""
+    # Hardware addressed by GPIO pins of the Pi, and which parts of the address are pins, as the drivers read them
+    GPIO_RELAYS = ("gpio",)
+    GPIO_DIMMERS = ("pwm-dimmer", "dc-dimmer")
+    GPIO_SENSORS = ("hc-sr04", "hc-sr04p", "jsn-sr04t")
+
+    @classmethod
+    def _gpio_pins(cls, entity, hardware, address) -> set:
+        """The BCM pin numbers a device drives or reads, through terrariumUtils.to_BCM_port_number as its driver does.
+        Empty for hardware that is not on GPIO pins (I2C sensors, an IO expander)."""
+        address = str(terrariumUtils.clean_address(address) or "").strip()
+        if entity is Relay and hardware in cls.GPIO_RELAYS:
+            parts = [part.strip() for part in address.split(",")]
+            if len(parts) >= 2 and parts[0].lower().startswith(("pcf8574-", "pcf8575-")):
+                return set()
+            parts = parts[:1]
+        elif entity is Relay and hardware in cls.GPIO_DIMMERS:
+            parts = [address]
+        elif entity is Sensor and hardware in cls.GPIO_SENSORS:
+            parts = [part.strip() for part in address.split(",") if part.strip()][:2]
+        else:
+            return set()
+
+        pins = set()
+        for part in parts:
+            pin = terrariumUtils.to_BCM_port_number(part)
+            # False means no such pin. 0 is BCM pin 0, and True is not a pin.
+            if isinstance(pin, int) and not isinstance(pin, bool):
+                pins.add(pin)
+        return pins
+
+    @classmethod
+    def _address_taken(cls, entity, address, own_id=None, hardware=None) -> bool:
+        """Whether another device of the same kind has this address, or a device of the other kind is on one of its
+        GPIO pins. Two devices on one address would share one hardware object (the driver cache key is hardware
+        plus address), so switching one would drive the other. A relay on a sensor's pin would drive that pin."""
         wanted = str(terrariumUtils.clean_address(address)).strip().casefold()
-        return any(
+        if any(
             row.id != own_id and str(terrariumUtils.clean_address(row.address)).strip().casefold() == wanted
             for row in entity.select()
-        )
+        ):
+            return True
+
+        pins = cls._gpio_pins(entity, hardware, address)
+        if not pins:
+            return False
+
+        other = Sensor if entity is Relay else Relay
+        return any(pins & cls._gpio_pins(other, row.hardware, row.address) for row in other.select())
 
     def _relay_not_off(self, relay_id) -> bool:
         """Whether the engine's relay is on, or in an unknown state. A relay the engine has not loaded has no engine
@@ -1152,7 +1191,7 @@ class terrariumManage(object):
         except ManageError as ex:
             raise HTTPError(status=400, body=str(ex))
 
-        if self._address_taken(entity, address):
+        if self._address_taken(entity, address, hardware=body["hardware"]):
             raise HTTPError(status=409, body="Another device already uses that address.")
 
         # The hardware type checks its own address when the device is built, as the classic add does
@@ -1221,7 +1260,7 @@ class terrariumManage(object):
             if area is not None:
                 raise HTTPError(status=409, body=f"This device is used by the area {area}.")
 
-            if self._address_taken(entity, changes["address"], row.id):
+            if self._address_taken(entity, changes["address"], row.id, row.hardware):
                 raise HTTPError(status=409, body="Another device already uses that address.")
 
             if "relays" == kind and self._relay_not_off(row.id):
