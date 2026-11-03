@@ -3,12 +3,14 @@ import terrariumLogging
 
 logger = terrariumLogging.logging.getLogger(__name__)
 
+import json
 import math
 
 from pony import orm
 from bottle import request, HTTPError
 
-from terrariumDatabase import Sensor
+from terrariumArea import terrariumArea
+from terrariumDatabase import Area, Sensor
 from hardware.sensor import terrariumSensor
 
 
@@ -103,6 +105,52 @@ def pair(low_name: str, high_name: str, body: dict, stored_low, stored_high, bou
     return new
 
 
+AREA_RUN_RANGES = {"heating": (60, 3600), "humidity": (1, 120)}
+RUN_AREA_FIELDS = {"name", "run_seconds", "settle_seconds", "day_night_difference"}
+LIGHT_AREA_FIELDS = {
+    "name",
+    "min_day_hours",
+    "max_day_hours",
+    "shift_day_hours",
+    "on_delay_minutes",
+    "off_delay_minutes",
+}
+AREA_FIELDS = {"heating": RUN_AREA_FIELDS, "humidity": RUN_AREA_FIELDS, "lights": LIGHT_AREA_FIELDS}
+
+
+def _stored_number(value):
+    """A number from a stored setup, where the classic UI may have left a string. None when it is not one."""
+    if isinstance(value, bool):
+        return None
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(value):
+        return None
+    return int(value) if value == int(value) else value
+
+
+def _tweak_parts(value) -> list:
+    # A light tweak is "<delay minutes>" or "<delay minutes>,<fade minutes>", as terrariumAreaLights.load_setup reads it
+    return [part.strip() for part in str(value).split(",")]
+
+
+def _light_delay(day: dict, key: str):
+    """The on or off delay in minutes of the first relay of the day period, as the engine reads it. 0 when the relay
+    has no tweak entry (the engine's default), None when the delays are not in the tweaks list."""
+    relays = day.get("relays") or []
+    tweaks = day.get("tweaks")
+    if not relays or not isinstance(tweaks, list):
+        return None
+
+    for entry in tweaks:
+        if isinstance(entry, dict) and entry.get("id") == relays[0]:
+            return _stored_number(_tweak_parts(entry.get(key, 0))[0])
+
+    return 0
+
+
 class terrariumManage(object):
     def __init__(self, webserver) -> None:
         self.webserver = webserver
@@ -121,6 +169,20 @@ class terrariumManage(object):
             self.sensor_put,
             apply=auth(),
             name="api:manage_sensor_put",
+        )
+        bottle_app.route(
+            "/api/manage/areas/<area:path>/",
+            "GET",
+            self.area_get,
+            apply=auth(False),
+            name="api:manage_area_get",
+        )
+        bottle_app.route(
+            "/api/manage/areas/<area:path>/",
+            "PUT",
+            self.area_put,
+            apply=auth(),
+            name="api:manage_area_put",
         )
 
     @staticmethod
@@ -185,3 +247,153 @@ class terrariumManage(object):
             raise HTTPError(status=500, body="The sensor was saved, but the engine could not reload it.")
 
         return self._sensor_body(sensor)
+
+    # --- areas ---
+    @staticmethod
+    def _area(area_id):
+        try:
+            area = Area[area_id]
+        except orm.core.ObjectNotFound:
+            raise HTTPError(status=404, body="That area does not exist.")
+
+        if area.type not in AREA_FIELDS:
+            raise HTTPError(status=400, body="Only heating, humidity and light areas can be changed here.")
+
+        return area
+
+    @staticmethod
+    def _setup(area) -> dict:
+        # A plain copy, so a change is stored as a new value and nothing is shared with Pony's tracked one
+        return json.loads(json.dumps(area.setup)) if isinstance(area.setup, dict) else {}
+
+    @staticmethod
+    def _area_body(area) -> dict:
+        setup = terrariumManage._setup(area)
+        body = {"id": area.id, "type": area.type, "name": area.name}
+        if "lights" == area.type:
+            day = setup.get("day") if isinstance(setup.get("day"), dict) else {}
+            body.update(
+                {
+                    "min_day_hours": _stored_number(setup.get("min_day_hours", 0)),
+                    "max_day_hours": _stored_number(setup.get("max_day_hours", 0)),
+                    "shift_day_hours": _stored_number(setup.get("shift_day_hours", 0)),
+                    "on_delay_minutes": _light_delay(day, "on"),
+                    "off_delay_minutes": _light_delay(day, "off"),
+                }
+            )
+        else:
+            low = setup.get("low") if isinstance(setup.get("low"), dict) else {}
+            body.update(
+                {
+                    "run_seconds": _stored_number(low.get("power_on_time", 0)),
+                    "settle_seconds": _stored_number(low.get("settle_time", 0)),
+                    "day_night_difference": _stored_number(setup.get("day_night_difference", 0)),
+                }
+            )
+
+        return body
+
+    @staticmethod
+    def _run_changes(area_type: str, body: dict, setup: dict) -> None:
+        if ("run_seconds" in body or "settle_seconds" in body) and not isinstance(setup.get("low"), dict):
+            raise ManageError("This area has no low period to change.")
+
+        if "run_seconds" in body:
+            setup["low"]["power_on_time"] = integer("run_seconds", body["run_seconds"], *AREA_RUN_RANGES[area_type])
+
+        if "settle_seconds" in body:
+            setup["low"]["settle_time"] = integer("settle_seconds", body["settle_seconds"], 0, 86400)
+
+        if "day_night_difference" in body:
+            setup["day_night_difference"] = number("day_night_difference", body["day_night_difference"], -10, 10)
+
+    @staticmethod
+    def _light_changes(body: dict, setup: dict) -> None:
+        hours = {}
+        for name in ("min_day_hours", "max_day_hours"):
+            if name in body:
+                hours[name] = number(name, body[name], 0, 24)
+
+        if hours:
+            low = hours.get("min_day_hours", _stored_number(setup.get("min_day_hours", 0)) or 0)
+            high = hours.get("max_day_hours", _stored_number(setup.get("max_day_hours", 0)) or 0)
+            if low > high:
+                raise ManageError("Min day hours must not be more than max day hours.")
+            setup.update(hours)
+
+        if "shift_day_hours" in body:
+            setup["shift_day_hours"] = number("shift_day_hours", body["shift_day_hours"], -12, 12)
+
+        delays = {}
+        for name, key in (("on_delay_minutes", "on"), ("off_delay_minutes", "off")):
+            if name in body:
+                # Whole minutes: the engine reads each part of a tweak with int()
+                delays[key] = integer(name, body[name], 0, 120)
+
+        if not delays:
+            return
+
+        day = setup.get("day")
+        if not isinstance(day, dict) or not day.get("relays"):
+            raise ManageError("This light area has no day relays to delay.")
+
+        if not isinstance(day.get("tweaks"), list):
+            raise ManageError("This light area keeps its delays in an old format. Change them in the classic UI once.")
+
+        tweaks = day["tweaks"]
+        for relay_id in day["relays"]:
+            entry = next((e for e in tweaks if isinstance(e, dict) and e.get("id") == relay_id), None)
+            if entry is None:
+                entry = {"id": relay_id, "on": 0, "off": 0}
+                tweaks.append(entry)
+
+            for key, delay in delays.items():
+                parts = _tweak_parts(entry.get(key, 0))
+                # A dimmer keeps its fade time after the comma
+                entry[key] = f"{delay},{parts[1]}" if len(parts) > 1 else delay
+
+    @orm.db_session()
+    def area_get(self, area):
+        return self._area_body(self._area(area))
+
+    @orm.db_session()
+    def area_put(self, area):
+        area = self._area(area)
+        setup = self._setup(area)
+
+        try:
+            body = fields(request.json, AREA_FIELDS[area.type])
+            changes = {}
+            if "name" in body:
+                changes["name"] = text("name", body["name"])
+
+            if "lights" == area.type:
+                self._light_changes(body, setup)
+            else:
+                self._run_changes(area.type, body, setup)
+        except ManageError as ex:
+            raise HTTPError(status=400, body=str(ex))
+
+        if len(body) == 0:
+            return self._area_body(area)
+
+        area.set(setup=setup, **changes)
+        orm.commit()
+
+        # The same reload as terrariumAPI.area_update: load_setup on the running area. A run in progress keeps its
+        # off time (terrariumArea.load_setup keeps _off_timers, the engine's timed runs are not touched), and the new
+        # run time counts from the next run.
+        try:
+            self.webserver.engine.update(
+                terrariumArea,
+                id=area.id,
+                enclosure=area.enclosure.id,
+                name=area.name,
+                mode=area.mode,
+                setup=self._setup(area),
+            )
+        except Exception:
+            logger.exception("Could not reload area after a change")
+            raise HTTPError(status=500, body="The area was saved, but the engine could not reload it.")
+
+        return self._area_body(area)

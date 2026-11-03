@@ -298,6 +298,9 @@ class terrariumArea(object):
 
     def load_setup(self, data) -> None:
         self._drop_night_shifts()
+        # A reload (an edit of the area) keeps the pending off of a run in progress: never reset this here. Its timer
+        # only acts while it is the one stored, so a new dict would leave the relay on with no run limit.
+        self.__dict__.setdefault("_off_timers", {})
         self.setup = copy.deepcopy(data)
         self.setup["day_night_difference"] = (
             0.0
