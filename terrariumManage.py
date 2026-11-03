@@ -39,7 +39,7 @@ def number(name: str, value: object, lo: float, hi: float) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ManageError(message)
 
-    if not math.isfinite(value) or not lo <= value <= hi:
+    if (isinstance(value, float) and not math.isfinite(value)) or not lo <= value <= hi:
         raise ManageError(message)
 
     return value

@@ -78,3 +78,12 @@ def test_error_never_echoes_value():
 def test_manage_routes_registered_before_generic():
     src = (Path(__file__).parent.parent / "terrariumAPI.py").read_text(encoding="utf-8")
     assert 0 <= src.index("terrariumManage(") < src.index('"/api/areas/<area:path>/"')
+
+
+def test_huge_int_is_a_manage_error_not_overflow():
+    with pytest.raises(ManageError):
+        number("offset", 10**400, -10, 10)
+    with pytest.raises(ManageError):
+        integer("delay", 10**400, 1, 720)
+    with pytest.raises(ManageError):
+        number("offset", -(10**400), -10, 10)
