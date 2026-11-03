@@ -15,8 +15,9 @@ from bottle import request, HTTPError
 
 from terrariumArea import terrariumArea
 from terrariumAlerts import load_alert_settings
-from terrariumDatabase import Area, NotificationService, Sensor, Setting
+from terrariumDatabase import Area, NotificationService, Relay, Sensor, Setting
 from terrariumUtils import terrariumUtils
+from hardware.relay import terrariumRelay
 from hardware.sensor import terrariumSensor
 
 
@@ -240,6 +241,55 @@ class terrariumManage(object):
             self.email_test,
             apply=auth(),
             name="api:manage_email_test",
+        )
+        bottle_app.route(
+            "/api/manage/system/",
+            "GET",
+            self.system_get,
+            apply=auth(False),
+            name="api:manage_system_get",
+        )
+        bottle_app.route(
+            "/api/manage/system/",
+            "PUT",
+            self.system_put,
+            apply=auth(),
+            name="api:manage_system_put",
+        )
+        bottle_app.route(
+            "/api/manage/devices/types/",
+            "GET",
+            self.devices_types,
+            apply=auth(False),
+            name="api:manage_devices_types",
+        )
+        bottle_app.route(
+            "/api/manage/devices/<kind>/scan/",
+            "POST",
+            self.devices_scan,
+            apply=auth(),
+            name="api:manage_devices_scan",
+        )
+        bottle_app.route(
+            "/api/manage/devices/<kind>/",
+            "POST",
+            self.device_add,
+            apply=auth(),
+            name="api:manage_device_add",
+        )
+        bottle_app.route(
+            "/api/manage/devices/<kind>/<device>/",
+            "PUT",
+            self.device_put,
+            apply=auth(),
+            name="api:manage_device_put",
+        )
+        bottle_app.route(
+            "/api/manage/devices/<kind>/<device>/",
+            "DELETE",
+            self.device_delete,
+            apply=auth(),
+            name="api:manage_device_delete",
         )
 
     @staticmethod
@@ -871,3 +921,266 @@ class terrariumManage(object):
             raise HTTPError(status=500, body="The test mail could not be sent. See the engine log.") from None
 
         return {"sent": True}
+
+    # --- system settings ---
+    SYSTEM_FIELDS = {"title", "graph_period"}
+    GRAPH_PERIODS = ("day", "week", "month")
+
+    @staticmethod
+    def _system_body() -> dict:
+        title = Setting.get(id="title")
+        period = Setting.get(id="graph_period")
+        return {
+            "title": title.value if title is not None and title.value else "TerrariumPI",
+            "graph_period": period.value if period is not None and period.value else "day",
+        }
+
+    @orm.db_session()
+    def system_get(self):
+        return self._system_body()
+
+    @orm.db_session()
+    def system_put(self):
+        changes = {}
+        try:
+            body = fields(request.json, self.SYSTEM_FIELDS)
+            if "title" in body:
+                changes["title"] = text("title", body["title"], 40)
+
+            if "graph_period" in body:
+                if not isinstance(body["graph_period"], str) or body["graph_period"] not in self.GRAPH_PERIODS:
+                    raise ManageError("Graph period must be day, week or month.")
+                changes["graph_period"] = body["graph_period"]
+        except ManageError as ex:
+            raise HTTPError(status=400, body=str(ex))
+
+        if not changes:
+            return self._system_body()
+
+        # Through the entity, then the engine reads its settings again
+        for name, value in changes.items():
+            row = Setting.get(id=name)
+            if row is None:
+                Setting(id=name, value=value)
+            else:
+                row.value = value
+        orm.commit()
+
+        try:
+            self.webserver.engine.load_settings()
+        except Exception:
+            logger.exception("Could not reload the settings after a change")
+            raise HTTPError(status=500, body="The settings were saved, but the engine could not reload them.") from None
+
+        return self._system_body()
+
+    # --- devices ---
+    DEVICE_KINDS = ("sensors", "relays")
+    DEVICE_ADD_FIELDS = {"sensors": {"hardware", "type", "name", "address"}, "relays": {"hardware", "name", "address"}}
+    DEVICE_PUT_FIELDS = {"name", "address"}
+
+    @classmethod
+    def _kind(cls, kind):
+        """The entity and the hardware class of a kind of device. Anything but sensors and relays is a 404."""
+        if kind not in cls.DEVICE_KINDS:
+            raise HTTPError(status=404, body="That kind of device does not exist.")
+
+        return (Sensor, terrariumSensor) if "sensors" == kind else (Relay, terrariumRelay)
+
+    @staticmethod
+    def _device_body(kind, row) -> dict:
+        body = {"id": row.id, "hardware": row.hardware}
+        if "sensors" == kind:
+            body["type"] = row.type
+        body.update({"name": row.name, "address": row.address})
+        return body
+
+    def devices_types(self):
+        return {
+            "sensors": [
+                {"hardware": entry["hardware"], "name": entry["name"], "types": list(entry["types"])}
+                for entry in terrariumSensor.available_sensors
+            ],
+            "relays": [
+                {"hardware": entry["hardware"], "name": entry["name"]} for entry in terrariumRelay.available_relays
+            ],
+        }
+
+    def devices_scan(self, kind):
+        self._kind(kind)
+        engine = self.webserver.engine
+        known = engine.sensors if "sensors" == kind else engine.relays
+        before = len(known)
+
+        try:
+            if "sensors" == kind:
+                engine.scan_new_sensors()
+            else:
+                engine.scan_new_relays()
+        except Exception:
+            logger.exception("The device scan failed")
+            raise HTTPError(status=500, body="The scan failed. See the engine log.") from None
+
+        return {"found": len(known) - before}
+
+    @staticmethod
+    def _id_list(value) -> list:
+        if isinstance(value, str):
+            return [value]
+
+        return [item for item in value if isinstance(item, str)] if isinstance(value, list) else []
+
+    @classmethod
+    def _area_uses(cls, setup, kind, device_id) -> bool:
+        """Whether an area setup names the device. Sensors are listed in setup.sensors. Relays are listed in the
+        relays of each period (low and high, or day and night), in a light's per-relay tweaks, and in main_lights."""
+        if not isinstance(setup, dict):
+            return False
+
+        if "sensors" == kind:
+            return device_id in cls._id_list(setup.get("sensors"))
+
+        if device_id in cls._id_list(setup.get("main_lights")):
+            return True
+
+        for period in setup.values():
+            if not isinstance(period, dict):
+                continue
+
+            if device_id in cls._id_list(period.get("relays")):
+                return True
+
+            tweaks = period.get("tweaks")
+            if isinstance(tweaks, dict) and device_id in tweaks:
+                return True
+
+            if isinstance(tweaks, list) and any(isinstance(item, dict) and item.get("id") == device_id for item in tweaks):
+                return True
+
+        return False
+
+    @classmethod
+    def _used_by(cls, kind, device_id):
+        names = sorted(area.name for area in Area.select() if cls._area_uses(area.setup, kind, device_id))
+        return names[0] if names else None
+
+    @orm.db_session()
+    def device_add(self, kind):
+        entity, hardware_class = self._kind(kind)
+
+        try:
+            allowed = self.DEVICE_ADD_FIELDS[kind]
+            body = fields(request.json, allowed, allowed)
+            listed = terrariumSensor.available_sensors if "sensors" == kind else terrariumRelay.available_relays
+            known = {entry["hardware"]: entry for entry in listed}
+            if not isinstance(body["hardware"], str) or body["hardware"] not in known:
+                raise ManageError("Hardware is not known.")
+
+            if "sensors" == kind and (
+                not isinstance(body["type"], str) or body["type"] not in known[body["hardware"]]["types"]
+            ):
+                raise ManageError("That hardware does not measure this type.")
+
+            name = text("name", body["name"])
+            address = text("address", body["address"], 100)
+        except ManageError as ex:
+            raise HTTPError(status=400, body=str(ex))
+
+        # The hardware type checks its own address when the device is built, as the classic add does
+        engine = self.webserver.engine
+        try:
+            if "sensors" == kind:
+                device = terrariumSensor(None, body["hardware"], body["type"], address, name)
+            else:
+                device = terrariumRelay(
+                    None, body["hardware"], address, name, None, callback=getattr(engine, "callback_relay", None)
+                )
+        except Exception:
+            logger.exception("Could not set up a new device")
+            raise HTTPError(status=400, body="The device could not be set up at that address.") from None
+
+        if entity.exists(id=device.id):
+            raise HTTPError(status=409, body="This device is already added.")
+
+        try:
+            engine.add(device)
+            if "sensors" == kind:
+                row = Sensor(
+                    id=device.id, hardware=body["hardware"], type=body["type"], name=name, address=device.address
+                )
+            else:
+                row = Relay(id=device.id, hardware=body["hardware"], name=name, address=device.address)
+
+            row.update(device.update())
+            orm.commit()
+        except Exception:
+            logger.exception("Could not add a device")
+            orm.rollback()
+            try:
+                engine.delete(hardware_class, device.id)
+            except Exception:
+                logger.exception("Could not take back a device that was not stored")
+            raise HTTPError(status=500, body="The device could not be added. See the engine log.") from None
+
+        return self._device_body(kind, row)
+
+    @orm.db_session()
+    def device_put(self, kind, device):
+        entity, hardware_class = self._kind(kind)
+        try:
+            row = entity[device]
+        except orm.core.ObjectNotFound:
+            raise HTTPError(status=404, body="That device does not exist.")
+
+        try:
+            body = fields(request.json, self.DEVICE_PUT_FIELDS)
+            changes = {}
+            if "name" in body:
+                changes["name"] = text("name", body["name"])
+
+            if "address" in body:
+                changes["address"] = text("address", body["address"], 100)
+        except ManageError as ex:
+            raise HTTPError(status=400, body=str(ex))
+
+        if not changes:
+            return self._device_body(kind, row)
+
+        row.set(**changes)
+        orm.commit()
+
+        # The same reload as the classic update: the running device takes the new name and address
+        data = {"id": row.id, "name": row.name, "address": row.address}
+        if "relays" == kind:
+            data["calibration"] = dict(row.calibration) if isinstance(row.calibration, dict) else {}
+
+        try:
+            self.webserver.engine.update(hardware_class, **data)
+        except Exception:
+            logger.exception("Could not reload a device after a change")
+            raise HTTPError(status=500, body="The device was saved, but the engine could not reload it.") from None
+
+        return self._device_body(kind, row)
+
+    @orm.db_session()
+    def device_delete(self, kind, device):
+        entity, hardware_class = self._kind(kind)
+        try:
+            row = entity[device]
+        except orm.core.ObjectNotFound:
+            raise HTTPError(status=404, body="That device does not exist.")
+
+        area = self._used_by(kind, row.id)
+        if area is not None:
+            raise HTTPError(status=409, body=f"This device is used by the area {area}.")
+
+        try:
+            self.webserver.engine.delete(hardware_class, row.id)
+            row.delete()
+            orm.commit()
+        except Exception:
+            logger.exception("Could not delete a device")
+            orm.rollback()
+            raise HTTPError(status=500, body="The device could not be deleted. See the engine log.") from None
+
+        return {"deleted": device}
