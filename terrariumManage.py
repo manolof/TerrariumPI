@@ -10,7 +10,8 @@ from pony import orm
 from bottle import request, HTTPError
 
 from terrariumArea import terrariumArea
-from terrariumDatabase import Area, Sensor
+from terrariumAlerts import load_alert_settings
+from terrariumDatabase import Area, Sensor, Setting
 from hardware.sensor import terrariumSensor
 
 
@@ -183,6 +184,20 @@ class terrariumManage(object):
             self.area_put,
             apply=auth(),
             name="api:manage_area_put",
+        )
+        bottle_app.route(
+            "/api/manage/alerts/",
+            "GET",
+            self.alerts_get,
+            apply=auth(False),
+            name="api:manage_alerts_get",
+        )
+        bottle_app.route(
+            "/api/manage/alerts/",
+            "PUT",
+            self.alerts_put,
+            apply=auth(),
+            name="api:manage_alerts_put",
         )
 
     @staticmethod
@@ -397,3 +412,96 @@ class terrariumManage(object):
             raise HTTPError(status=500, body="The area was saved, but the engine could not reload it.")
 
         return self._area_body(area)
+
+    # --- alerts ---
+    ALERT_FIELDS = {"delay_minutes", "quiet_minutes", "recovery", "sensors", "mail"}
+    ALERT_MAIL_KEYS = {"alerts", "errors", "start_stop"}
+    ALERT_OVERRIDE_KEYS = {"delay_minutes", "quiet_minutes", "recovery"}
+
+    @staticmethod
+    def _alerts_stored() -> dict:
+        row = Setting.get(id="ludwig_alerts")
+        return load_alert_settings(None if row is None else row.value)
+
+    @staticmethod
+    def _alerts_body(settings: dict) -> dict:
+        body = json.loads(json.dumps(settings))
+        body["sensors_enabled"] = {sensor.id: bool(sensor.notification) for sensor in Sensor.select()}
+        return body
+
+    @orm.db_session()
+    def alerts_get(self):
+        return self._alerts_body(self._alerts_stored())
+
+    @orm.db_session()
+    def alerts_put(self):
+        settings = self._alerts_stored()
+
+        try:
+            body = fields(request.json, self.ALERT_FIELDS)
+            for name in ("delay_minutes", "quiet_minutes"):
+                if name in body:
+                    label = "Alert delay" if "delay_minutes" == name else "Quiet time"
+                    low, high = (1, 720) if "delay_minutes" == name else (10, 1440)
+                    message = f"{label} must be from {low} to {high} minutes."
+                    try:
+                        settings[name] = number(name, body[name], low, high)
+                    except ManageError:
+                        raise ManageError(message)
+
+            if "recovery" in body:
+                if not isinstance(body["recovery"], bool):
+                    raise ManageError("Recovery must be true or false.")
+                settings["recovery"] = body["recovery"]
+
+            if "mail" in body:
+                mail = fields(body["mail"], self.ALERT_MAIL_KEYS)
+                for key, value in mail.items():
+                    if not isinstance(value, bool):
+                        raise ManageError(f"Mail {key.replace('_', ' ')} must be true or false.")
+                    settings["mail"][key] = value
+
+            if "sensors" in body:
+                # The given map replaces the stored one, so an override is removed by leaving it out
+                if not isinstance(body["sensors"], dict):
+                    raise ManageError("Sensors must be a set of sensor overrides.")
+                overrides = {}
+                for sensor_id, override in body["sensors"].items():
+                    if not Sensor.exists(id=sensor_id):
+                        raise ManageError("An alert override names a sensor that does not exist.")
+                    override = fields(override, self.ALERT_OVERRIDE_KEYS)
+                    checked = {}
+                    for key, value in override.items():
+                        if "recovery" == key:
+                            if not isinstance(value, bool):
+                                raise ManageError("Sensor recovery must be true or false.")
+                            checked[key] = value
+                        elif "delay_minutes" == key:
+                            try:
+                                checked[key] = number(key, value, 1, 720)
+                            except ManageError:
+                                raise ManageError("Sensor alert delay must be from 1 to 720 minutes.")
+                        else:
+                            try:
+                                checked[key] = number(key, value, 10, 1440)
+                            except ManageError:
+                                raise ManageError("Sensor quiet time must be from 10 to 1440 minutes.")
+                    overrides[sensor_id] = checked
+                settings["sensors"] = overrides
+        except ManageError as ex:
+            raise HTTPError(status=400, body=str(ex))
+
+        raw = json.dumps(settings)
+        row = Setting.get(id="ludwig_alerts")
+        if row is None:
+            Setting(id="ludwig_alerts", value=raw)
+        else:
+            row.value = raw
+        orm.commit()
+
+        # The tracker keeps its episodes. The error limiter keeps what it sent and only takes the new quiet time.
+        engine = self.webserver.engine
+        engine.alerts.reload(settings)
+        engine.quiet_errors.quiet_minutes = settings["quiet_minutes"]
+
+        return self._alerts_body(settings)
