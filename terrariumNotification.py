@@ -118,6 +118,7 @@ class terrariumNotification(terrariumSingleton):
             "placeholders": {**__DEFAULT_PLACEHOLDERS},
         },
         "sensor_alarm": {"name": N_("Sensor alarm"), "placeholders": {**__DEFAULT_PLACEHOLDERS}},
+        "sensor_recovered": {"name": N_("Sensor back in limits"), "placeholders": {**__DEFAULT_PLACEHOLDERS}},
         "relay_update": {
             "name": N_("Relay update (every 30 seconds)"),
             "placeholders": {
@@ -173,7 +174,12 @@ class terrariumNotification(terrariumSingleton):
     __MESSAGES["system_update_error"]["placeholders"] = __MESSAGES["system_update_warning"]["placeholders"]
 
     __MESSAGES["sensor_change"]["placeholders"] = __MESSAGES["sensor_update"]["placeholders"]
-    __MESSAGES["sensor_alarm"]["placeholders"] = __MESSAGES["sensor_update"]["placeholders"]
+    # Sent by the alert rule (terrariumAlerts), with how long the sensor has been out of limits
+    __MESSAGES["sensor_alarm"]["placeholders"] = {
+        **__MESSAGES["sensor_update"]["placeholders"],
+        "out_minutes": N_("Minutes out of limits"),
+    }
+    __MESSAGES["sensor_recovered"]["placeholders"] = __MESSAGES["sensor_alarm"]["placeholders"]
 
     __MESSAGES["relay_change"]["placeholders"] = __MESSAGES["relay_update"]["placeholders"]
     __MESSAGES["relay_toggle"]["placeholders"] = __MESSAGES["relay_update"]["placeholders"]

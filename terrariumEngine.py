@@ -10,6 +10,9 @@ weatherLogger = terrariumLogging.logging.getLogger("terrariumWeather")
 # Repeat failures of the weather retry go here: terrariumLogging.NotificationLogger does not mail this logger,
 # so only the first failure raises a system_error line.
 weatherRetryLogger = terrariumLogging.logging.getLogger("terrariumWeatherRetry")
+# The engine loop guard logs here. terrariumLogging.NotificationLogger does not mail this logger: the guard
+# sends its own system_error mail, once per kind of error per quiet time (terrariumAlerts.QuietErrors).
+guardLogger = terrariumLogging.logging.getLogger("terrariumEngineGuard")
 
 import threading
 import time
@@ -53,6 +56,7 @@ from hardware.relay import (
 from hardware.webcam import terrariumWebcam, terrariumWebcamLoadingException
 
 from terrariumNotification import terrariumNotification
+from terrariumAlerts import AlertTracker, QuietErrors, load_alert_settings
 
 
 # https://docs.python.org/3/library/gettext.html#deferred-translations
@@ -146,6 +150,9 @@ class terrariumEngine(object):
 
         # Load settings. This will also load the weather data if available
         self.load_settings()
+
+        # Alert rule for sensor mails and quiet time for error mails. Read once, here.
+        self._load_alerts()
 
         # Notification system
         self.notification = terrariumNotification(self)
@@ -692,6 +699,61 @@ class terrariumEngine(object):
                 reason = "excluded" if sensor.id in self.settings["exclude_ids"] else "already loaded"
                 sensorLogger.debug(f"Ignored sensor {sensor} because it is {reason}.")
 
+    def _load_alerts(self, clock=time.time) -> None:
+        raw = None
+        with orm.db_session():
+            row = Setting.get(id="ludwig_alerts")
+            if row is not None:
+                raw = row.value
+
+        settings = load_alert_settings(raw)
+        self.alerts = AlertTracker(settings, clock)
+        self.quiet_errors = QuietErrors(settings["quiet_minutes"], clock)
+
+    def _sensor_alert(self, sensor_data) -> None:
+        # Out is an alarm or a sensor that stopped reading. The tracker decides if a mail goes out.
+        try:
+            out = bool(sensor_data.get("alarm")) or bool(sensor_data.get("error"))
+            enabled = bool(sensor_data.get("notification", True))
+            result = self.alerts.update(sensor_data["id"], out, enabled)
+            if result is None or not self.alerts.settings["mail"]["alerts"]:
+                return
+
+            message_data = copy.copy(sensor_data)
+            message_data["out_minutes"] = round(self.alerts.out_minutes(sensor_data["id"]))
+            self.notification.message("sensor_alarm" if result == "alarm" else "sensor_recovered", message_data)
+        except Exception:
+            # The other sensors of this round must still be updated
+            guardLogger.exception(f"The alert check of sensor {sensor_data.get('id')} failed.")
+            self._error_mail("sensor_alert", "An alert check of a sensor failed. See the engine log.")
+
+    def _error_mail(self, kind: str, message: str) -> None:
+        # One system_error mail per kind of error per quiet time. Never raises: it runs in the loop guard.
+        try:
+            settings = self.alerts.settings
+            if not settings["mail"]["errors"]:
+                return
+            # Follows a reload of the alert settings
+            self.quiet_errors.quiet_minutes = settings["quiet_minutes"]
+            if self.quiet_errors.allow(kind):
+                self.notification.message("system_error", {"message": message})
+        except Exception as ex:
+            guardLogger.warning(f"The error mail for {kind} was not sent ({type(ex).__name__}).")
+
+    def _sensor_skipped(self, sensor) -> None:
+        # A round with no usable reading still counts for the alert rule: an old value, or none (error)
+        try:
+            with orm.db_session():
+                sensor_data = Sensor[sensor.id].to_dict()
+        except Exception:
+            guardLogger.exception(f"The alert check of sensor {sensor.id} could not read the sensor.")
+            self._error_mail("sensor_alert", "An alert check of a sensor failed. See the engine log.")
+            return
+
+        sensor_data["unit"] = self.units.get(sensor.type)
+        sensor_data["type"] = sensor.type
+        self._sensor_alert(sensor_data)
+
     def _update_sensors(self) -> bool:
         sensors = []
         with orm.db_session():
@@ -730,6 +792,7 @@ class terrariumEngine(object):
                 sensorLogger.warning(
                     f"Could not take a new measurement from sensor {self.sensors[sensor.id]}. Tried for {measurement_time:.2f} seconds. Skipping this update."
                 )
+                self._sensor_skipped(sensor)
                 continue
 
             # We have a valid reading from the hardware sensor. Convert it and apply the offset
@@ -739,6 +802,7 @@ class terrariumEngine(object):
                 sensorLogger.warning(
                     f"Measurement for sensor {self.sensors[sensor.id]} of {new_value:.2f}{self.units[sensor.type]} is outside valid range {sensor.limit_min:.2f}{self.units[sensor.type]} to {sensor.limit_max:.2f}{self.units[sensor.type]}. Skipping this update."
                 )
+                self._sensor_skipped(sensor)
                 continue
 
             if current_value is not None and sensor.max_diff != 0 and abs(current_value - new_value) > sensor.max_diff:
@@ -791,8 +855,8 @@ class terrariumEngine(object):
                 if new_value != current_value:
                     self.notification.message("sensor_change", sensor_data)
 
-                if sensor_data["alarm"]:
-                    self.notification.message("sensor_alarm", sensor_data)
+                # sensor_alarm and sensor_recovered: only when the alert rule says so
+                self._sensor_alert(sensor_data)
 
                 sensorLogger.info(
                     f"Updated sensor {self.sensors[sensor.id]} with new value {new_value:.2f}{self.units[sensor.type]} in {measurement_time+db_time:.2f} seconds."
@@ -1427,8 +1491,12 @@ class terrariumEngine(object):
 
                     # System stats (needs weather update)
                     self.webserver.websocket_message("systemstats", self.system_stats())
-                except Exception:
-                    logger.exception("The weather or system stats update of this round failed.")
+                except Exception as ex:
+                    guardLogger.exception("The weather or system stats update of this round failed.")
+                    self._error_mail(
+                        f"weather_stats:{type(ex).__name__}",
+                        "The weather or system stats update of a round failed. See the engine log.",
+                    )
 
                 # Run updates in parallel and wait till all done
                 with futures.ThreadPoolExecutor() as pool:
@@ -1444,8 +1512,12 @@ class terrariumEngine(object):
 
                 # Cleanup hanging bluetooth helper scripts....
                 terrariumUtils.kill_bluetooth_helper_processes()
-            except Exception:
-                logger.exception("An engine update round failed. The next round goes on as normal.")
+            except Exception as ex:
+                guardLogger.exception("An engine update round failed. The next round goes on as normal.")
+                self._error_mail(
+                    f"round:{type(ex).__name__}",
+                    "An engine update round failed. The next round goes on as normal. See the engine log.",
+                )
 
             duration = time.time() - start
             time_left = terrariumEngine.__ENGINE_LOOP_TIMEOUT - duration

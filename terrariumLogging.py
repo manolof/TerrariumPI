@@ -80,9 +80,10 @@ class TimedCompressedRotatingFileHandler(logging.handlers.TimedRotatingFileHandl
 
 
 # Loggers whose lines are never turned into notification messages: terrariumNotification (it would loop),
-# terrariumLogging (this handler reporting its own failure) and terrariumWeatherRetry (repeat failures of a
-# retry whose first failure was already sent).
-NOT_NOTIFIED = ("terrariumNotification", "terrariumLogging", "terrariumWeatherRetry")
+# terrariumLogging (this handler reporting its own failure), terrariumWeatherRetry (repeat failures of a
+# retry whose first failure was already sent) and terrariumEngineGuard (the engine loop guard, which sends
+# its own error mail, once per kind of error per quiet time).
+NOT_NOTIFIED = ("terrariumNotification", "terrariumLogging", "terrariumWeatherRetry", "terrariumEngineGuard")
 
 
 class NotificationLogger(logging.StreamHandler):

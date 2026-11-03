@@ -52,7 +52,7 @@ def test_an_error_before_the_database_is_ready_does_not_raise_and_is_reported_on
 def test_the_report_itself_is_never_sent_as_a_notification(logging_module):
     handler = logging_module.NotificationLogger()
 
-    for name in ("terrariumLogging", "terrariumNotification", "terrariumWeatherRetry"):
+    for name in ("terrariumLogging", "terrariumNotification", "terrariumWeatherRetry", "terrariumEngineGuard"):
         handler.emit(logging.LogRecord(name, logging.ERROR, __file__, 1, "x", None, None))
 
     handler.notification.message.assert_not_called()

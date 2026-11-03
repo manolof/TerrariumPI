@@ -94,3 +94,39 @@ def test_a_message_with_no_service_does_not_raise(notification_module, sensor_db
     notification.reload_service("never-stored", {"name": "x", "enabled": True, "setup": {}})
     notification.delete_service("tg-2")
     notification.stop()
+
+
+def test_sensor_recovered_is_a_message_type(notification_module):
+    types_ = {m["type"]: m for m in notification_module.terrariumNotification.available_messages}
+
+    assert "sensor_recovered" in types_
+    for message_type in ("sensor_alarm", "sensor_recovered"):
+        assert "out_minutes" in types_[message_type]["placeholders"]
+        assert "value" in types_[message_type]["placeholders"]
+    # The plain update messages do not get the alert placeholder
+    assert "out_minutes" not in types_["sensor_update"]["placeholders"]
+
+
+@pytest.mark.parametrize("message_type", ["sensor_alarm", "sensor_recovered"])
+def test_an_alert_of_an_enabled_sensor_reaches_the_mail_service(notification_module, sensor_db, message_type):
+    from pony import orm
+    from terrariumDatabase import NotificationMessage
+
+    with orm.db_session():
+        service = add_service("mail-2", "email", "Mail")
+        NotificationMessage(
+            id="m-2", type=message_type, title="{name} {out_minutes} min", message="M", services=[service]
+        )
+
+    notification = notification_module.terrariumNotification(ENGINE)
+    notification.load_services()
+    send = mock.MagicMock()
+    notification.services["mail-2"].send_message = send
+
+    # The tracker only returns a mail for a sensor with its switch on, so the data carries notification True
+    notification.message(message_type, {"name": "Warm side", "notification": True, "out_minutes": 31})
+    notification.message(message_type, {"name": "Cold side", "notification": False, "out_minutes": 31})
+
+    assert send.call_count == 1
+    assert send.call_args.args[0] == message_type
+    assert send.call_args.args[1] == "Warm side 31 min"

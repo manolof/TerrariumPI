@@ -6,6 +6,7 @@ from unittest import mock
 import pytest
 
 import terrariumEngine
+from terrariumAlerts import AlertTracker, QuietErrors, load_alert_settings
 
 ROUNDS = 3
 
@@ -31,6 +32,11 @@ def make_engine():
     engine._terrariumEngine__update_checker = mock.MagicMock()
     engine._update_enclosures = mock.MagicMock()
     engine.motd = mock.MagicMock()
+    # A fake clock: the error mails follow the quiet time of the alert settings
+    engine.clock = SimpleNamespace(now=0.0)
+    alert_settings = load_alert_settings(None)
+    engine.alerts = AlertTracker(alert_settings, lambda: engine.clock.now)
+    engine.quiet_errors = QuietErrors(alert_settings["quiet_minutes"], lambda: engine.clock.now)
     return engine
 
 
@@ -87,3 +93,72 @@ def test_a_weather_fault_does_not_cost_the_round_its_area_update(step, caplog):
     assert engine._update_sensors.call_count == ROUNDS
     assert engine._update_enclosures.call_count == ROUNDS
     assert len(failures(caplog)) == ROUNDS
+
+
+def error_mails(engine):
+    return [c for c in engine.notification.message.call_args_list if c.args[0] == "system_error"]
+
+
+def test_a_failing_round_mails_once_per_quiet_time():
+    engine = make_engine()
+    engine._update_enclosures.side_effect = RuntimeError("area")
+
+    run_loop(engine)
+
+    # Each round is logged, on a logger the notification handler does not mail, and one mail goes out
+    assert len(error_mails(engine)) == 1
+    assert "round failed" in error_mails(engine)[0].args[1]["message"]
+
+
+def test_the_quiet_time_is_per_kind_of_error():
+    engine = make_engine()
+    engine._update_enclosures.side_effect = RuntimeError("area")
+    engine.system_stats.side_effect = RuntimeError("stats")
+
+    run_loop(engine)
+
+    assert len(error_mails(engine)) == 2
+
+
+def test_after_the_quiet_time_one_more_mail():
+    engine = make_engine()
+    engine._update_enclosures.side_effect = RuntimeError("area")
+    run_loop(engine)
+    engine.clock.now = 59 * 60.0
+    engine.wait.reset_mock()
+    run_loop(engine)
+    assert len(error_mails(engine)) == 1
+    engine.clock.now = 60 * 60.0
+    engine.wait.reset_mock()
+    run_loop(engine)
+    assert len(error_mails(engine)) == 2
+
+
+def test_error_mails_off_sends_none():
+    engine = make_engine()
+    engine.alerts.settings["mail"]["errors"] = False
+    engine._update_enclosures.side_effect = RuntimeError("area")
+
+    run_loop(engine)
+
+    assert error_mails(engine) == []
+
+
+def test_the_loop_guard_logs_on_the_guard_logger(caplog):
+    engine = make_engine()
+    engine._update_enclosures.side_effect = RuntimeError("area")
+
+    with caplog.at_level(logging.ERROR):
+        run_loop(engine)
+
+    assert {r.name for r in failures(caplog)} == {"terrariumEngineGuard"}
+
+
+def test_a_failing_error_mail_does_not_end_the_loop():
+    engine = make_engine()
+    engine._update_enclosures.side_effect = RuntimeError("area")
+    engine.notification.message.side_effect = RuntimeError("mail")
+
+    run_loop(engine)
+
+    assert engine.wait.call_count == ROUNDS
