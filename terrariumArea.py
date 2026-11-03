@@ -87,7 +87,11 @@ class terrariumArea(object):
         logger.debug(f"Area {self} is powered: {powered}")
         return powered
 
-    def _time_table(self) -> bool:
+    def _time_table(self, setup=None) -> bool:
+        # setup: a new setup that load_setup is still building. It gets the timetable before it is set.
+        if setup is None:
+            setup = self.setup
+
         def make_time_table(begin, end, on_period: int = 0, off_period: int = 0):
             logger.debug(
                 f"Make new time table for {self}. Begin: {begin}, End: {end}, On: {on_period}, Off: {off_period}"
@@ -155,14 +159,14 @@ class terrariumArea(object):
             main_lights = self.enclosure.main_lights
             if main_lights is not None:
                 for period in self.PERIODS:
-                    if period not in self.setup:
+                    if period not in setup:
                         continue
 
                     if "timetable" not in main_lights.setup["day" if "low" == period else "night"]:
                         logger.warning(f"The main lights have no timetable yet, so {self} has none either.")
                         continue
 
-                    self.setup[period]["timetable"] = copy.deepcopy(
+                    setup[period]["timetable"] = copy.deepcopy(
                         main_lights.setup["day" if "low" == period else "night"]["timetable"]
                     )
 
@@ -198,7 +202,7 @@ class terrariumArea(object):
                 self.enclosure.weather.next_sunset if "weather" == self.mode else self.enclosure.weather.next_sunrise
             )
 
-            max_hours = self.setup["max_day_hours"]
+            max_hours = setup["max_day_hours"]
             if max_hours != 0 and (sunset - sunrise) > datetime.timedelta(hours=max_hours):
                 # On period to long, so reduce the on period by shifting the sunrise and sunset times closer to each other
                 seconds_difference = ((sunset - sunrise) - datetime.timedelta(hours=max_hours)) / 2
@@ -211,7 +215,7 @@ class terrariumArea(object):
                 next_sunrise += seconds_difference
                 next_sunset -= seconds_difference
 
-            min_hours = self.setup["min_day_hours"]
+            min_hours = setup["min_day_hours"]
             if min_hours != 0 and (sunset - sunrise) < datetime.timedelta(hours=min_hours):
                 # On period to short, so extend the on period by shifting the sunrise and sunset times away from to each other
                 seconds_difference = (datetime.timedelta(hours=min_hours) - (sunset - sunrise)) / 2
@@ -224,7 +228,7 @@ class terrariumArea(object):
                 next_sunrise -= seconds_difference
                 next_sunset += seconds_difference
 
-            shift_hours = self.setup["shift_day_hours"]
+            shift_hours = setup["shift_day_hours"]
             if shift_hours != 0:
                 # Shift the times back or forth...
                 sunrise += datetime.timedelta(hours=shift_hours)
@@ -247,38 +251,38 @@ class terrariumArea(object):
 
         elif "timer" == self.mode:
             for period in self.PERIODS:
-                if period not in self.setup:
+                if period not in setup:
                     continue
 
                 begin = None
                 try:
-                    begin = datetime.time.fromisoformat(self.setup[period]["begin"])
+                    begin = datetime.time.fromisoformat(setup[period]["begin"])
                 except Exception as ex:
-                    logger.exception(f'Error loading begin time: {self.setup[period]["begin"]} - {ex}')
+                    logger.exception(f'Error loading begin time: {setup[period]["begin"]} - {ex}')
 
                 end = None
                 try:
-                    end = datetime.time.fromisoformat(self.setup[period]["end"])
+                    end = datetime.time.fromisoformat(setup[period]["end"])
                 except Exception as ex:
-                    logger.exception(f'Error loading end time: {self.setup[period]["end"]} - {ex}')
+                    logger.exception(f'Error loading end time: {setup[period]["end"]} - {ex}')
 
                 if begin is None or end is None:
                     logger.warning("Error generating timer periods. Either begin or end time is incorrect.")
                     continue
 
-                on_period = max(0.0, self.setup[period]["on_duration"]) * 60.0
-                off_period = max(0.0, self.setup[period]["off_duration"]) * 60.0
+                on_period = max(0.0, setup[period]["on_duration"]) * 60.0
+                off_period = max(0.0, setup[period]["off_duration"]) * 60.0
 
                 timetable[period] = make_time_table(begin, end, on_period, off_period)
 
         for period in timetable:
-            if period not in self.setup:
+            if period not in setup:
                 continue
 
-            self.setup[period]["timetable"] = copy.deepcopy(timetable[period]["periods"])
+            setup[period]["timetable"] = copy.deepcopy(timetable[period]["periods"])
 
-            self.state[period]["begin"] = self.setup[period]["timetable"][0][0]
-            self.state[period]["end"] = self.setup[period]["timetable"][-1][1]
+            self.state[period]["begin"] = setup[period]["timetable"][0][0]
+            self.state[period]["end"] = setup[period]["timetable"][-1][1]
             self.state[period]["duration"] = timetable[period]["duration"]
 
         return True
@@ -287,84 +291,100 @@ class terrariumArea(object):
         for sensor_id in getattr(self, "setup", {}).get("sensors", []):
             Sensor.night_shifts.pop(sensor_id, None)
 
-    def _apply_night_shift(self) -> None:
+    def _apply_night_shift(self, old_sensors=()) -> None:
         # The database holds the day limits. At night the sensors of this area get the day/night difference on top.
         shift = 0.0
         if self.state.get("is_day") is False:
             shift = self.setup["day_night_difference"]
 
-        for sensor_id in self.setup.get("sensors", []):
+        sensors = self.setup.get("sensors", [])
+        for sensor_id in sensors:
             Sensor.night_shifts[sensor_id] = shift
 
+        # A sensor this area no longer uses loses its shift. One it keeps was never without one.
+        for sensor_id in old_sensors:
+            if sensor_id not in sensors:
+                Sensor.night_shifts.pop(sensor_id, None)
+
+    def _load_tweaks(self, setup: dict, data) -> None:
+        # Per-relay extras of a period. Only light areas have them.
+        pass
+
     def load_setup(self, data) -> None:
-        self._drop_night_shifts()
+        # The new setup is built and normalised in a local dict and set in one assignment. The engine thread reads
+        # self.setup at any time: it sees the old setup, whole, until then, never a half-built one (no tweaks, no
+        # timetable). The night shift of the sensors stays in place until the new one replaces it.
         # A reload (an edit of the area) keeps the pending off of a run in progress: never reset this here. Its timer
         # only acts while it is the one stored, so a new dict would leave the relay on with no run limit.
         self.__dict__.setdefault("_off_timers", {})
-        self.setup = copy.deepcopy(data)
-        self.setup["day_night_difference"] = (
+        old_sensors = list(getattr(self, "setup", {}).get("sensors", []))
+
+        setup = copy.deepcopy(data)
+        setup["day_night_difference"] = (
             0.0
-            if not terrariumUtils.is_float(self.setup.get("day_night_difference"))
-            else float(self.setup.get("day_night_difference"))
+            if not terrariumUtils.is_float(setup.get("day_night_difference"))
+            else float(setup.get("day_night_difference"))
         )
         if self.state.get("last_update", None) is None:
             self.state = {
-                "is_day": self.setup.get("is_day", None),
+                "is_day": setup.get("is_day", None),
                 "last_update": int(datetime.datetime(1970, 1, 1).timestamp()),
                 "powered": None,
             }
 
-        self.ignore_low_alarm = False
-        self.ignore_high_alarm = False
+        try:
+            ignore_low_alarm = bool(setup["low"]["ignore_low"])
+        except Exception:
+            ignore_low_alarm = False
 
         try:
-            self.ignore_low_alarm = bool(self.setup["low"]["ignore_low"])
+            ignore_high_alarm = bool(setup["high"]["ignore_high"])
         except Exception:
-            self.ignore_low_alarm = False
-
-        try:
-            self.ignore_high_alarm = bool(self.setup["high"]["ignore_high"])
-        except Exception:
-            self.ignore_high_alarm = False
+            ignore_high_alarm = False
 
         float_values = ["max_day_hours", "min_day_hours", "shift_day_hours"]
         for float_value in float_values:
-            self.setup[float_value] = self.setup.get(float_value, 0.0)
-            self.setup[float_value] = (
-                0.0 if not terrariumUtils.is_float(self.setup[float_value]) else float(self.setup[float_value])
-            )
+            setup[float_value] = setup.get(float_value, 0.0)
+            setup[float_value] = 0.0 if not terrariumUtils.is_float(setup[float_value]) else float(setup[float_value])
 
         for period in self.PERIODS:
             # Clean up parts that do not have relays configured)
-            if period in self.setup and len(self.setup[period]["relays"]) == 0:
-                del self.setup[period]
+            if period in setup and len(setup[period]["relays"]) == 0:
+                del setup[period]
                 continue
 
             # With version 4.6.0 we get also empty string fields back. So we have to make sure that the fields in the list below are all float values
             float_values = ["on_duration", "off_duration", "settle_time", "power_on_time"]
             for float_value in float_values:
-                self.setup[period][float_value] = self.setup[period].get(float_value, 0.0)
-                self.setup[period][float_value] = (
+                setup[period][float_value] = setup[period].get(float_value, 0.0)
+                setup[period][float_value] = (
                     0.0
-                    if not terrariumUtils.is_float(self.setup[period][float_value])
-                    else float(self.setup[period][float_value])
+                    if not terrariumUtils.is_float(setup[period][float_value])
+                    else float(setup[period][float_value])
                 )
 
-            self.setup[period]["tweaks"] = {}
+            setup[period]["tweaks"] = {}
 
             if period not in self.state:
                 self.state[period] = {}
                 self.state[period]["last_powered_on"] = 0
 
-            self.state[period]["powered"] = self.relays_state(period)
+            self.state[period]["powered"] = self.relays_state(period, setup=setup)
             self.state[period]["alarm_count"] = 0
 
+        self._load_tweaks(setup, data)
+
         if "sensors" != self.mode:
-            self._time_table()
+            self._time_table(setup)
+
+        # The one assignment
+        self.setup = setup
+        self.ignore_low_alarm = ignore_low_alarm
+        self.ignore_high_alarm = ignore_high_alarm
 
         self.state["powered"] = self._powered
 
-        self._apply_night_shift()
+        self._apply_night_shift(old_sensors)
 
     def _is_timer_time(self, period):
         if period not in self.setup or "timetable" not in self.setup[period]:
@@ -621,11 +641,15 @@ class terrariumArea(object):
 
         return sensor_values
 
-    def relays_state(self, part, state: bool = True):
+    def relays_state(self, part, state: bool = True, setup=None):
+        # setup: a new setup that load_setup is still building
+        if setup is None:
+            setup = self.setup
+
         old_state = self.state[part].get("powered", None)
 
         relay_states = []
-        for relay in self.setup[part]["relays"]:
+        for relay in setup[part]["relays"]:
             if relay not in self.enclosure.relays:
                 continue
 
@@ -763,57 +787,55 @@ class terrariumAreaLights(terrariumArea):
                     f"Set the relay {relay.name} to {relay.ON if action else relay.OFF} with a delay of {delay/60:.2f} minutes"
                 )
 
-    def load_setup(self, data) -> None:
-        super().load_setup(data)
-
-        # Load extra tweaks
+    def _load_tweaks(self, setup: dict, data) -> None:
+        # Load extra tweaks, into the new setup before load_setup sets it
         for period in self.PERIODS:
-            if period not in self.setup:
+            if period not in setup:
                 continue
 
             if data[period].get("tweaks", None) in [None, {}]:
                 # Legacy tweaks loading
-                for relay_id in self.setup[period]["relays"]:
+                for relay_id in setup[period]["relays"]:
                     relay = self.enclosure.relays[relay_id]
 
-                    extra_tweaks = self.setup[period].get(
+                    extra_tweaks = setup[period].get(
                         ("dimmer_duration_" if relay.is_dimmer else "relay_delay_") + "on_" + relay.id, None
                     )
                     if extra_tweaks is None:
                         continue
 
-                    self.setup[period]["tweaks"][f"{relay.id}"] = {
+                    setup[period]["tweaks"][f"{relay.id}"] = {
                         "on": {"delay": 0, "duration": 0},
                         "off": {"delay": 0, "duration": 0},
                     }
 
                     if relay.is_dimmer:
-                        values = self.setup[period][
+                        values = setup[period][
                             ("dimmer_duration_" if relay.is_dimmer else "relay_delay_") + "on_" + relay.id
                         ].split(",")
                         if len(values) == 1:
                             values = [0, values[0]]
 
-                        self.setup[period]["tweaks"][f"{relay.id}"]["on"]["delay"] = float(values[0]) * 60.0
-                        self.setup[period]["tweaks"][f"{relay.id}"]["on"]["duration"] = float(values[1]) * 60.0
+                        setup[period]["tweaks"][f"{relay.id}"]["on"]["delay"] = float(values[0]) * 60.0
+                        setup[period]["tweaks"][f"{relay.id}"]["on"]["duration"] = float(values[1]) * 60.0
 
-                        values = self.setup[period][
+                        values = setup[period][
                             ("dimmer_duration_" if relay.is_dimmer else "relay_delay_") + "off_" + relay.id
                         ].split(",")
                         if len(values) == 1:
                             values = [0, values[0]]
 
-                        self.setup[period]["tweaks"][f"{relay.id}"]["off"]["delay"] = float(values[0]) * 60.0
-                        self.setup[period]["tweaks"][f"{relay.id}"]["off"]["duration"] = float(values[1]) * 60.0
+                        setup[period]["tweaks"][f"{relay.id}"]["off"]["delay"] = float(values[0]) * 60.0
+                        setup[period]["tweaks"][f"{relay.id}"]["off"]["duration"] = float(values[1]) * 60.0
                     else:
-                        value = self.setup[period][
+                        value = setup[period][
                             ("dimmer_duration_" if relay.is_dimmer else "relay_delay_") + "on_" + relay.id
                         ]
-                        self.setup[period]["tweaks"][f"{relay.id}"]["on"]["delay"] = float(value) * 60.0
-                        value = self.setup[period][
+                        setup[period]["tweaks"][f"{relay.id}"]["on"]["delay"] = float(value) * 60.0
+                        value = setup[period][
                             ("dimmer_duration_" if relay.is_dimmer else "relay_delay_") + "off_" + relay.id
                         ]
-                        self.setup[period]["tweaks"][f"{relay.id}"]["off"]["delay"] = float(value) * 60.0
+                        setup[period]["tweaks"][f"{relay.id}"]["off"]["delay"] = float(value) * 60.0
             else:
                 # New tweaks loading
                 tweaks = {}
@@ -834,7 +856,10 @@ class terrariumAreaLights(terrariumArea):
                         },
                     }
 
-                self.setup[period]["tweaks"] = tweaks
+                setup[period]["tweaks"] = tweaks
+
+    def load_setup(self, data) -> None:
+        super().load_setup(data)
 
         # Reset the powered on state if the dimmers are not at max value. So the dimmer will continue where it left off
         for period in self.PERIODS:

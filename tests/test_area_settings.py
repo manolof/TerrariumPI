@@ -835,3 +835,79 @@ def test_nothing_writes_stored_limits(home):
     assert "variation" not in home.areas["Heat"].state
     with orm.db_session():
         assert (Sensor[TEMPERATURE].alarm_min, Sensor[TEMPERATURE].alarm_max) == (22, 28)
+
+
+# --- a new setup is set in one step ---
+def watch_reload(area, steps):
+    """Records, at each step of a reload that calls out, the setup the engine thread would read and the shifts."""
+    real_relays_state = area.relays_state
+    real_time_table = area._time_table
+
+    def seen():
+        steps.append(
+            {
+                "setup": area.setup,
+                "tweaks": copy.deepcopy(area.setup.get("day", {}).get("tweaks")),
+                "shifts": dict(Sensor.night_shifts),
+            }
+        )
+
+    def relays_state(*args, **kwargs):
+        seen()
+        return real_relays_state(*args, **kwargs)
+
+    def time_table(*args, **kwargs):
+        seen()
+        return real_time_table(*args, **kwargs)
+
+    return mock.patch.multiple(area, relays_state=relays_state, _time_table=time_table)
+
+
+def test_a_reload_at_night_keeps_the_night_shift_until_it_is_replaced(home):
+    area = home.areas["Heat"]
+    area.state["is_day"] = False
+    area.load_setup(LIVE_AREAS["Heat"]["setup"])
+    assert Sensor.night_shifts[TEMPERATURE] == -2
+    old = area.setup
+
+    steps = []
+    setup = copy.deepcopy(LIVE_AREAS["Heat"]["setup"])
+    setup["day_night_difference"] = -3
+    with watch_reload(area, steps):
+        area.load_setup(setup)
+
+    assert any(step["setup"] is old for step in steps), "the reload reads the relays before it sets the setup"
+    for step in steps:
+        # The engine thread reads the old setup, whole, or the new one, whole: never one being built. The night
+        # shift is in place all along.
+        assert step["setup"] is old or step["setup"] is area.setup
+        assert step["shifts"][TEMPERATURE] == -2
+    assert area.setup is not old and area.setup["day_night_difference"] == -3
+    assert Sensor.night_shifts[TEMPERATURE] == -3
+
+
+def test_a_reload_of_a_light_never_shows_empty_tweaks(home):
+    area = home.areas["Light"]
+    tweaks = copy.deepcopy(area.setup["day"]["tweaks"])
+    assert tweaks[MAIN_LIGHT]["on"]["delay"] == 3600
+    old = area.setup
+
+    steps = []
+    with watch_reload(area, steps):
+        area.load_setup(LIVE_AREAS["Light"]["setup"])
+
+    assert any(step["setup"] is old for step in steps)
+    for step in steps:
+        assert step["setup"] is old or step["setup"] is area.setup
+        assert step["tweaks"] == tweaks
+    assert area.setup["day"]["tweaks"] == tweaks
+
+
+def test_a_sensor_taken_out_of_an_area_loses_its_night_shift(home):
+    area = home.areas["Heat"]
+    area.state["is_day"] = False
+    area.load_setup(LIVE_AREAS["Heat"]["setup"])
+    setup = copy.deepcopy(LIVE_AREAS["Heat"]["setup"])
+    setup["sensors"] = []
+    area.load_setup(setup)
+    assert TEMPERATURE not in Sensor.night_shifts
