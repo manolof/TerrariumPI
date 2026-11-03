@@ -84,6 +84,11 @@ else:
     print("ok  RPi.GPIO is installed")
 sys.exit(1 if bad else 0)
 """
+# Seeded rows (seed.sql) used for the per-id manage routes: the temperature sensor and the Heat area.
+SEED_SENSOR_ID = "721ce353dd0e129fbd1e2e5130c3a0a3"
+SEED_AREA_ID = "105f3e6e-7bcd-4242-921e-836980015108"
+# Weather key, mail user and mail password are write-only: no response may carry a value under these names.
+SECRET_NAMES = ("password", "username", "appid", "key")
 EXPECTED_COUNTS = {"/api/areas/": 4, "/api/sensors/": 2, "/api/relays/": 4, "/api/enclosures/": 1}
 
 MIGRATE_AND_SEED = """
@@ -106,6 +111,34 @@ def run(cmd, check=True, timeout=None):
     if check and result.returncode != 0:
         raise RuntimeError(f"{' '.join(cmd)} failed ({result.returncode}):\n{result.stdout}\n{result.stderr}")
     return result
+
+
+def manage_paths(sensor_id, area_id):
+    """Every GET route of terrariumManage, with ids for the per-id ones."""
+    return [
+        f"/api/manage/sensors/{sensor_id}/",
+        f"/api/manage/areas/{area_id}/",
+        "/api/manage/alerts/",
+        "/api/manage/location/",
+        "/api/manage/email/",
+        "/api/manage/system/",
+        "/api/manage/devices/types/",
+    ]
+
+
+def secret_field_problems(data, path="$"):
+    """Paths of fields named like a secret that hold a value, anywhere in the JSON. Never returns the value."""
+    problems = []
+    if isinstance(data, dict):
+        for name, value in data.items():
+            here = f"{path}.{name}"
+            if str(name).lower() in SECRET_NAMES and value not in (None, "", False):
+                problems.append(here)
+            problems.extend(secret_field_problems(value, here))
+    elif isinstance(data, list):
+        for index, value in enumerate(data):
+            problems.extend(secret_field_problems(value, f"{path}[{index}]"))
+    return problems
 
 
 def raspivid_problems(returncode, output):
@@ -329,6 +362,16 @@ def main():
                     record(f"{path} holds {expected} seeded rows", count == expected, f"(found {count})")
                 except Exception as ex:
                     record(f"{path} is JSON", False, str(ex))
+
+        for path in manage_paths(SEED_SENSOR_ID, SEED_AREA_ID):
+            status, body = http_get(path, timeout=60)
+            try:
+                found = secret_field_problems(json.loads(body)) if status == 200 else []
+            except Exception as ex:
+                record(f"GET {path} is JSON", False, str(ex))
+                continue
+            record(f"GET {path}", status == 200, f"(status {status})")
+            record(f"GET {path} holds no secret value", not found, "; ".join(found))
 
         if "/api/sensors/" in bodies:
             try:

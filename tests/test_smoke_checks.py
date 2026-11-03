@@ -51,3 +51,35 @@ def test_a_glibc_too_old_fails():
 def test_the_wrapper_failing_to_start_the_binary_fails():
     assert smoke.raspivid_help_problems(127, "/usr/bin/raspivid: 2: exec: /opt/legacy-camera/raspivid: not found\n")
     assert smoke.raspivid_help_problems(126, "")
+
+
+def test_a_body_with_no_secret_names_passes():
+    body = {"id": "a", "limits": {"low": 22, "high": 28}, "key_set": True, "list": [{"name": "x"}]}
+    assert smoke.secret_field_problems(body) == []
+
+
+def test_empty_or_missing_secret_values_pass():
+    assert smoke.secret_field_problems({"password": "", "username": None, "appid": "", "key": None}) == []
+
+
+def test_a_secret_name_with_a_value_fails_and_is_named_by_path():
+    body = {"mail": {"password": "hunter2"}, "rows": [{"appid": "abc"}], "key": 5, "username": "me"}
+    problems = smoke.secret_field_problems(body)
+    assert sorted(problems) == ["$.key", "$.mail.password", "$.rows[0].appid", "$.username"]
+
+
+def test_the_problem_text_never_holds_the_value():
+    assert "hunter2" not in " ".join(smoke.secret_field_problems({"password": "hunter2"}))
+
+
+def test_secret_names_match_in_any_case():
+    assert smoke.secret_field_problems({"Password": "x"}) == ["$.Password"]
+
+
+def test_manage_paths_cover_every_get_route_with_a_seeded_id():
+    paths = smoke.manage_paths("S1", "A1")
+    assert "/api/manage/sensors/S1/" in paths
+    assert "/api/manage/areas/A1/" in paths
+    for fixed in ("alerts", "location", "email", "system", "devices/types"):
+        assert f"/api/manage/{fixed}/" in paths
+    assert len(paths) == 7
