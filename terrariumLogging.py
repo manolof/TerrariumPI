@@ -94,10 +94,26 @@ class NotificationLogger(logging.StreamHandler):
         # The notification will later on get a reference to the terrariumEngine for version and profile information
         self.notification = terrariumNotification()
 
+    def _allowed(self, record) -> bool:
+        """The engine's errors switch and quiet time, once the engine has built them. Before that, every line."""
+        engine = getattr(self.notification, "engine", None)
+        alerts = getattr(engine, "alerts", None)
+        quiet_errors = getattr(engine, "quiet_errors", None)
+        if alerts is None or quiet_errors is None:
+            return True
+
+        if not alerts.settings["mail"]["errors"]:
+            return False
+
+        # One mail per logger and level per quiet time: a fault that repeats every round must not mail every round
+        return quiet_errors.allow(f"log:{record.name}:{record.levelname.lower()}")
+
     def emit(self, record) -> None:
         # Do not send messages from terrariumNotification logging, as that will trigger a recursing error.
         if record.name not in NOT_NOTIFIED and str(record.levelname.lower()) in ["warning", "error"]:
             try:
+                if not self._allowed(record):
+                    return
                 self.notification.message(f"system_{record.levelname.lower()}", {"message": record.getMessage()})
             except Exception as ex:
                 # A log call must never stop the program. Before the database mapping exists (start-up),

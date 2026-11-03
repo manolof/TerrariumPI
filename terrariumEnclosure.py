@@ -2,6 +2,8 @@
 import terrariumLogging
 
 logger = terrariumLogging.logging.getLogger(__name__)
+# The same logger as the engine loop guard: terrariumLogging.NotificationLogger does not mail it
+guardLogger = terrariumLogging.logging.getLogger("terrariumEngineGuard")
 
 from terrariumArea import terrariumArea, terrariumAreaException
 from terrariumUtils import terrariumUtils
@@ -106,7 +108,15 @@ class terrariumEnclosure(object):
                 area_states[area_id] = copy.deepcopy(self.areas[area_id].state)
                 area_states[area_id] = self.areas[area_id].update(read_only)
             except Exception as ex:
-                logger.exception(f"Error updating area {self.areas[area_id].name}: {ex}")
+                # The traceback goes to the log on a logger that is not mailed. The mail goes through the engine,
+                # once per area and kind of error per quiet time, and not at all with error mails off.
+                guardLogger.exception(f"Error updating area {self.areas[area_id].name}: {ex}")
+                error_mail = getattr(self.engine, "_error_mail", None)
+                if callable(error_mail):
+                    error_mail(
+                        f"area:{area_id}:{type(ex).__name__}",
+                        f"The area {self.areas[area_id].name} could not be updated. See the engine log.",
+                    )
 
         return area_states
 

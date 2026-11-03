@@ -72,3 +72,71 @@ def test_info_is_not_sent(logging_module):
     handler.emit(record(logging.INFO))
 
     handler.notification.message.assert_not_called()
+
+
+# With the engine built, the handler follows the errors switch and the quiet time
+
+
+class Clock:
+    def __init__(self):
+        self.now = 1_000_000
+
+    def __call__(self):
+        return self.now
+
+
+def built_engine(errors=True, clock=None):
+    from types import SimpleNamespace
+
+    from terrariumAlerts import QuietErrors
+
+    return SimpleNamespace(
+        alerts=SimpleNamespace(settings={"mail": {"alerts": True, "errors": errors, "start_stop": True}}),
+        quiet_errors=QuietErrors(60, clock or Clock()),
+    )
+
+
+def named(name, level=logging.ERROR, message="something failed"):
+    return logging.LogRecord(name, level, __file__, 1, message, None, None)
+
+
+def test_with_error_mails_off_nothing_is_sent(logging_module):
+    handler = logging_module.NotificationLogger()
+    handler.notification.engine = built_engine(errors=False)
+
+    handler.emit(named("terrariumUtils"))
+    handler.emit(named("terrariumUtils", logging.WARNING))
+
+    handler.notification.message.assert_not_called()
+
+
+def test_one_mail_per_logger_and_level_per_quiet_time(logging_module):
+    clock = Clock()
+    handler = logging_module.NotificationLogger()
+    handler.notification.engine = built_engine(clock=clock)
+
+    for _ in range(5):
+        handler.emit(named("terrariumUtils", message="first"))
+    handler.emit(named("terrariumUtils", logging.WARNING))
+    handler.emit(named("terrariumArea"))
+
+    sent = [c.args for c in handler.notification.message.call_args_list]
+    assert sent == [
+        ("system_error", {"message": "first"}),
+        ("system_warning", {"message": "something failed"}),
+        ("system_error", {"message": "something failed"}),
+    ]
+
+    clock.now += 60 * 60
+    handler.emit(named("terrariumUtils", message="again"))
+    assert handler.notification.message.call_args.args == ("system_error", {"message": "again"})
+
+
+def test_before_the_engine_is_built_every_line_is_sent(logging_module):
+    handler = logging_module.NotificationLogger()
+    handler.notification.engine = None
+
+    handler.emit(named("terrariumUtils"))
+    handler.emit(named("terrariumUtils"))
+
+    assert handler.notification.message.call_count == 2

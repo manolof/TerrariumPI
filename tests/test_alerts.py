@@ -499,3 +499,46 @@ def test_zero_quiet_time_stored_does_not_spam(clock):
     tracker = AlertTracker(load_alert_settings('{"quiet_minutes": 0}'), clock)
     sent = run(tracker, clock, [(0, 89 * MIN + 1, True)])
     assert sent == {30 * MIN: "alarm"}
+
+
+# An area that fails every round: the enclosure guard mails through the engine's quiet time and errors switch
+
+
+def failing_area_engine(clock, errors=True):
+    from terrariumEnclosure import terrariumEnclosure
+
+    with orm.db_session():
+        Setting(id="ludwig_alerts", value=json.dumps({"mail": {"errors": errors}}))
+    engine = terrariumEngine.terrariumEngine.__new__(terrariumEngine.terrariumEngine)
+    engine.notification = mock.MagicMock()
+    engine._load_alerts(clock)
+    enclosure = terrariumEnclosure("enc", "Ludwig", engine, areas=[])
+
+    def broken(read_only):
+        raise KeyError("broken")
+
+    enclosure.areas["a1"] = mock.MagicMock(type="heating", setup={}, state={}, update=broken)
+    enclosure.areas["a1"].name = "Heat"
+    return engine, enclosure
+
+
+def test_an_area_failing_every_round_sends_one_mail_per_quiet_time(sensor_db, clock, caplog):
+    engine, enclosure = failing_area_engine(clock)
+    with caplog.at_level(logging.ERROR):
+        for t in range(0, 130 * MIN, STEP):
+            clock.at(t)
+            enclosure.update()
+
+    assert len(sent(engine, "system_error")) == 3
+    # The traceback stays in the log, on a logger the notification handler does not mail
+    records = [r for r in caplog.records if "Heat" in r.getMessage() and r.exc_info is not None]
+    assert records and {r.name for r in records} == {"terrariumEngineGuard"}
+
+
+def test_an_area_failing_with_error_mails_off_sends_nothing(sensor_db, clock):
+    engine, enclosure = failing_area_engine(clock, errors=False)
+    for t in range(0, 130 * MIN, STEP):
+        clock.at(t)
+        enclosure.update()
+
+    assert sent(engine, "system_error") == []
