@@ -45,6 +45,9 @@ if [[ ! -d "${DIR}" ]]; then
   mkdir -p "${DIR}"
 fi
 
+# /dev/shm is the host's: chunks an earlier start left stay in memory until a reboot
+rm -f "${DIR}"/chunk_*.ts
+
 ROTATION_ACTION=""
 if [[ "${ROTATION}" == "h" ]]; then
   ROTATION_ACTION="--hflip"
