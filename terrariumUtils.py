@@ -549,6 +549,9 @@ class terrariumUtils:
     @staticmethod
     def bluetooth_available():
         cmd = "/usr/bin/hcitool dev"
+        if not os.path.exists(cmd.split()[0]):
+            return False
+
         data = terrariumUtils.get_script_data(cmd, False)
         if data is None:
             return False

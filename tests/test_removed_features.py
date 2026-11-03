@@ -6,6 +6,7 @@ import ast
 import importlib
 import json
 import logging
+import os
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -238,3 +239,23 @@ def test_every_third_party_import_is_in_requirements():
                     if package not in required:
                         missing.add(f"{path.name}: {top}")
     assert sorted(missing) == []
+
+
+def _real_bluetooth_available(run):
+    """terrariumUtils is a MagicMock in the tests: take the real function out of its source."""
+    tree = ast.parse((ROOT / "terrariumUtils.py").read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "bluetooth_available":
+            node.decorator_list = []
+            module = ast.Module(body=[node], type_ignores=[])
+            break
+    namespace = {"os": os, "terrariumUtils": SimpleNamespace(get_script_data=run)}
+    exec(compile(ast.fix_missing_locations(module), "terrariumUtils.py", "exec"), namespace)
+    return namespace["bluetooth_available"]
+
+
+def test_bluetooth_available_without_hcitool_runs_nothing():
+    run = mock.Mock(return_value=b"Devices: hci0")
+    with mock.patch("os.path.exists", return_value=False):
+        assert _real_bluetooth_available(run)() is False
+    run.assert_not_called()
