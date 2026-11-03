@@ -544,3 +544,39 @@ def test_delete_removes_history_without_loading_it(manage, engine, house):
         # Other devices keep theirs
         assert SensorHistory.select(lambda h: h.sensor.id == "temp1").count() == 50
         assert RelayHistory.select(lambda h: h.relay.id == "heat").count() == 50
+
+
+# --- a relay that is on ---
+@pytest.mark.parametrize("state", [100, 40, None])
+def test_address_change_of_a_relay_that_is_not_off_is_refused(manage, engine, house, state):
+    engine.relays["spare-relay"] = SimpleNamespace(state=state)
+    err = fail(manage, "device_put", {"address": "18"}, "relays", "spare-relay")
+    assert err.status == 409 and err.body == "Switch it off first."
+    engine.update.assert_not_called()
+    with orm.db_session():
+        assert Relay["spare-relay"].address == "8"
+
+
+def test_address_change_of_a_relay_at_0_is_allowed(manage, engine, house):
+    engine.relays["spare-relay"] = SimpleNamespace(state=0)
+    assert call(manage, "device_put", {"address": "18"}, "relays", "spare-relay")["address"] == "18"
+
+
+def test_name_change_of_a_relay_that_is_on_is_allowed(manage, engine, house):
+    engine.relays["spare-relay"] = SimpleNamespace(state=100)
+    assert call(manage, "device_put", {"name": "Fan", "address": "8"}, "relays", "spare-relay")["name"] == "Fan"
+
+
+@pytest.mark.parametrize("state", [100, None])
+def test_delete_of_a_relay_that_is_not_off_is_refused(manage, engine, house, state):
+    engine.relays["spare-relay"] = SimpleNamespace(state=state)
+    err = fail(manage, "device_delete", None, "relays", "spare-relay")
+    assert err.status == 409 and err.body == "Switch it off first."
+    engine.delete.assert_not_called()
+    with orm.db_session():
+        assert Relay.exists(id="spare-relay")
+
+
+def test_delete_of_a_relay_at_0_is_allowed(manage, engine, house):
+    engine.relays["spare-relay"] = SimpleNamespace(state=0)
+    assert call(manage, "device_delete", None, "relays", "spare-relay") == {"deleted": "spare-relay"}

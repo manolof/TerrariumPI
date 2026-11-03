@@ -1114,6 +1114,17 @@ class terrariumManage(object):
             for row in entity.select()
         )
 
+    def _relay_not_off(self, relay_id) -> bool:
+        """Whether the engine's relay is on, or in an unknown state. A relay the engine has not loaded has no engine
+        value and is not driven by it. The running hardware keeps its old pin until a restart, and a deleted relay
+        is no longer switched by anything, so either one left on would stay on."""
+        relay = self.webserver.engine.relays.get(relay_id)
+        if relay is None:
+            return False
+
+        state = relay.state
+        return state is None or state != 0
+
     @classmethod
     def _used_by(cls, kind, device_id):
         names = sorted(area.name for area in Area.select() if cls._area_uses(area.setup, kind, device_id))
@@ -1213,6 +1224,9 @@ class terrariumManage(object):
             if self._address_taken(entity, changes["address"], row.id):
                 raise HTTPError(status=409, body="Another device already uses that address.")
 
+            if "relays" == kind and self._relay_not_off(row.id):
+                raise HTTPError(status=409, body="Switch it off first.")
+
         row.set(**changes)
         orm.commit()
 
@@ -1240,6 +1254,9 @@ class terrariumManage(object):
         area = self._used_by(kind, row.id)
         if area is not None:
             raise HTTPError(status=409, body=f"This device is used by the area {area}.")
+
+        if "relays" == kind and self._relay_not_off(row.id):
+            raise HTTPError(status=409, body="Switch it off first.")
 
         try:
             self.webserver.engine.delete(hardware_class, row.id)
