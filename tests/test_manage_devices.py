@@ -292,18 +292,18 @@ def test_add_engine_failure_is_500(manage, engine, sensor_db):
 
 # --- update ---
 def test_put_device_only_name_and_address(manage, engine, house):
-    result = call(manage, "device_put", {"name": "Warmer", "address": "2"}, "sensors", "temp1")
-    assert result == {"id": "temp1", "hardware": "bme280", "type": "temperature", "name": "Warmer", "address": "2"}
+    result = call(manage, "device_put", {"name": "Warmer", "address": "2"}, "sensors", "spare")
+    assert result == {"id": "spare", "hardware": "bme280", "type": "humidity", "name": "Warmer", "address": "2"}
     with orm.db_session():
-        assert (Sensor["temp1"].name, Sensor["temp1"].address) == ("Warmer", "2")
+        assert (Sensor["spare"].name, Sensor["spare"].address) == ("Warmer", "2")
     engine.update.assert_called_once()
-    assert engine.update.call_args.kwargs == {"id": "temp1", "name": "Warmer", "address": "2"}
+    assert engine.update.call_args.kwargs == {"id": "spare", "name": "Warmer", "address": "2"}
 
     for body in ({"hardware": "gpio"}, {"type": "humidity"}, {"id": "x"}, {"calibration": {}}, {"name": "x", "wattage": 3}):
-        assert fail(manage, "device_put", body, "sensors", "temp1").status == 400
+        assert fail(manage, "device_put", body, "sensors", "spare").status == 400
         assert fail(manage, "device_put", body, "relays", "heat").status == 400
     with orm.db_session():
-        assert Sensor["temp1"].type == "temperature" and Sensor["temp1"].hardware == "bme280"
+        assert Sensor["spare"].type == "humidity" and Sensor["spare"].hardware == "bme280"
         assert Relay["heat"].wattage == 0
 
 
@@ -318,6 +318,33 @@ def test_put_relay_keeps_calibration(manage, engine, house):
         "address": "5",
         "calibration": {"dimmer_offset": 3},
     }
+
+
+def test_put_address_of_used_device_refused(manage, engine, house):
+    err = fail(manage, "device_put", {"address": "99"}, "relays", "heat")
+    assert err.status == 409
+    assert err.body == "This device is used by the area Heat area."
+    err = fail(manage, "device_put", {"name": "Heater", "address": "99"}, "relays", "heat")
+    assert err.status == 409
+    assert fail(manage, "device_put", {"address": "99"}, "sensors", "temp1").status == 409
+    engine.update.assert_not_called()
+    with orm.db_session():
+        assert (Relay["heat"].name, Relay["heat"].address) == ("Heat", "5")
+        assert Sensor["temp1"].address == "1"
+
+
+def test_put_name_of_used_device_allowed(manage, engine, house):
+    result = call(manage, "device_put", {"name": "Heater"}, "relays", "heat")
+    assert result["name"] == "Heater" and result["address"] == "5"
+    # The same address is not a change
+    assert call(manage, "device_put", {"name": "Heater 2", "address": "5"}, "relays", "heat")["name"] == "Heater 2"
+    assert engine.update.call_count == 2
+
+
+def test_put_address_of_unused_device_allowed(manage, engine, house):
+    result = call(manage, "device_put", {"address": "18"}, "relays", "spare-relay")
+    assert result["address"] == "18"
+    engine.update.assert_called_once()
 
 
 def test_put_name_rules(manage, house):

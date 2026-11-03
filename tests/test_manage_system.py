@@ -90,11 +90,12 @@ def test_title_trimmed(manage):
 
 
 def test_graph_period_values(manage):
-    for value in ("day", "week", "month"):
+    for value in ("day", "week", "month", "year"):
         assert put(manage, {"graph_period": value})["graph_period"] == value
-    for value in ("year", "Day", "", None, 1, ["day"]):
+        assert manage.system_get()["graph_period"] == value
+    for value in ("decade", "Day", "", None, 1, ["day"]):
         assert status_of(manage, {"graph_period": value}).status == 400
-    assert stored("graph_period") == "month"
+    assert stored("graph_period") == "year"
 
 
 def test_login_level_refused(manage, engine):
@@ -117,7 +118,7 @@ def test_bad_body_refused(manage):
 
 
 def test_nothing_written_when_one_field_is_bad(manage, engine):
-    assert status_of(manage, {"title": "Ludwig", "graph_period": "year"}).status == 400
+    assert status_of(manage, {"title": "Ludwig", "graph_period": "decade"}).status == 400
     assert stored("title") == "TerrariumPI"
     engine.load_settings.assert_not_called()
 

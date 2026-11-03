@@ -924,7 +924,7 @@ class terrariumManage(object):
 
     # --- system settings ---
     SYSTEM_FIELDS = {"title", "graph_period"}
-    GRAPH_PERIODS = ("day", "week", "month")
+    GRAPH_PERIODS = ("day", "week", "month", "year")
 
     @staticmethod
     def _system_body() -> dict:
@@ -949,7 +949,7 @@ class terrariumManage(object):
 
             if "graph_period" in body:
                 if not isinstance(body["graph_period"], str) or body["graph_period"] not in self.GRAPH_PERIODS:
-                    raise ManageError("Graph period must be day, week or month.")
+                    raise ManageError("Graph period must be day, week, month or year.")
                 changes["graph_period"] = body["graph_period"]
         except ManageError as ex:
             raise HTTPError(status=400, body=str(ex))
@@ -1145,6 +1145,12 @@ class terrariumManage(object):
 
         if not changes:
             return self._device_body(kind, row)
+
+        # A new address for a device an area uses could move a live heater or pump. A new name is safe.
+        if "address" in changes and changes["address"] != row.address:
+            area = self._used_by(kind, row.id)
+            if area is not None:
+                raise HTTPError(status=409, body=f"This device is used by the area {area}.")
 
         row.set(**changes)
         orm.commit()
