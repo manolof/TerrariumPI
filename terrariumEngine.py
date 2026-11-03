@@ -717,13 +717,19 @@ class terrariumEngine(object):
                 sensorLogger.debug(f"Ignored sensor {sensor} because it is {reason}.")
 
     def _load_alerts(self, clock=time.monotonic) -> None:
-        raw = None
-        with orm.db_session():
-            row = Setting.get(id="ludwig_alerts")
-            if row is not None:
-                raw = row.value
+        # Start-up goes on whatever the stored settings are: engine.alerts and engine.quiet_errors always exist
+        try:
+            raw = None
+            with orm.db_session():
+                row = Setting.get(id="ludwig_alerts")
+                if row is not None:
+                    raw = row.value
 
-        settings = load_alert_settings(raw)
+            settings = load_alert_settings(raw)
+        except Exception as ex:
+            logger.warning(f"The alert settings could not be loaded ({type(ex).__name__}). The defaults are used.")
+            settings = load_alert_settings(None)
+
         self.alerts = AlertTracker(settings, clock)
         self.quiet_errors = QuietErrors(settings["quiet_minutes"], clock)
 

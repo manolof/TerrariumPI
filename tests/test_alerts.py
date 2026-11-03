@@ -333,6 +333,24 @@ def test_no_recovery_mail_when_no_alarm_mail_was_sent(sensor_db, clock):
     assert sent(engine, "sensor_alarm") == [] and sent(engine, "sensor_recovered") == []
 
 
+def test_start_goes_on_when_the_alert_settings_can_not_be_loaded(sensor_db, caplog):
+    engine = terrariumEngine.terrariumEngine.__new__(terrariumEngine.terrariumEngine)
+    with mock.patch.object(terrariumEngine, "load_alert_settings", side_effect=[RuntimeError("bad"), load_alert_settings(None)]):
+        with caplog.at_level(logging.WARNING):
+            engine._load_alerts()
+    assert engine.alerts.settings == DEFAULTS
+    assert engine.quiet_errors.quiet_minutes == 60
+    assert "alert settings" in caplog.text
+
+
+def test_start_goes_on_when_the_settings_row_can_not_be_read(sensor_db):
+    engine = terrariumEngine.terrariumEngine.__new__(terrariumEngine.terrariumEngine)
+    with mock.patch.object(terrariumEngine.Setting, "get", side_effect=RuntimeError("db")):
+        engine._load_alerts()
+    assert engine.alerts.settings == DEFAULTS
+    assert engine.quiet_errors.quiet_minutes == 60
+
+
 def test_engine_reads_the_settings_row_at_start(sensor_db):
     engine = terrariumEngine.terrariumEngine.__new__(terrariumEngine.terrariumEngine)
     engine._load_alerts()
