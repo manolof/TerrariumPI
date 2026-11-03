@@ -558,12 +558,17 @@ class terrariumNotificationServiceEmail(terrariumNotificationService):
                 smtp_settings["user"] = self.setup["username"]
                 smtp_settings["password"] = self.setup["password"]
 
+            accepted = []
             for receiver in self.setup["receiver"]:
                 response = email_message.send(to=(receiver, receiver), smtp=smtp_settings)
+                accepted.append(response.status_code == 250)
 
                 if response.status_code == 250:
                     # Mail sent, clear remaining connection types
-                    sent = True
                     mail_tls_ssl = []
+
+            if any(accepted):
+                # The result means every receiver accepted it. Delivery above is unchanged.
+                sent = all(accepted)
 
         return sent

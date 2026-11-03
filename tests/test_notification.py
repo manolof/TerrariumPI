@@ -132,7 +132,7 @@ def test_an_alert_of_an_enabled_sensor_reaches_the_mail_service(notification_mod
     assert send.call_args.args[1] == "Warm side 31 min"
 
 
-def _mail_service(notification_module, service_id="mail-3", enabled=True):
+def _mail_service(notification_module, service_id="mail-3", enabled=True, receiver="r@example.com"):
     from pony import orm
     from terrariumDatabase import NotificationService
 
@@ -148,7 +148,7 @@ def _mail_service(notification_module, service_id="mail-3", enabled=True):
                 "username": "fake-user",
                 "password": "fake-pass",
                 "sender": "s@example.com",
-                "receiver": "r@example.com",
+                "receiver": receiver,
             },
         )
 
@@ -184,6 +184,23 @@ def test_test_message_fails_when_the_server_refuses(notification_module, sensor_
         notification.test_message("mail-3")
 
     assert "fake-user" not in str(err.value) and "fake-pass" not in str(err.value)
+
+
+def test_test_message_with_two_receivers_needs_both_accepted(notification_module, sensor_db):
+    notification = _mail_service(notification_module, receiver="a@example.com,b@example.com")
+
+    message = mock.MagicMock()
+    message.send.side_effect = [types.SimpleNamespace(status_code=250), types.SimpleNamespace(status_code=550)]
+    with mock.patch.object(notification_module.emails, "Message", return_value=message):
+        with pytest.raises(notification_module.terrariumNotificationServiceException):
+            notification.test_message("mail-3")
+
+    # Both accepted: it is sent. Real delivery still tries every receiver, once, in one connection type.
+    message.send.reset_mock()
+    message.send.side_effect = [types.SimpleNamespace(status_code=250)] * 2
+    with mock.patch.object(notification_module.emails, "Message", return_value=message):
+        notification.test_message("mail-3")
+    assert message.send.call_count == 2
 
 
 def test_test_message_needs_a_loaded_enabled_service(notification_module, sensor_db):
