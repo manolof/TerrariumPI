@@ -1206,11 +1206,15 @@ class terrariumAPI(object):
             )
 
         else:
-            query = orm.select(
-                (sh.timestamp, sh.value, sh.alarm_min, sh.alarm_max, sh.limit_min, sh.limit_max)
-                for sh in SensorHistory
-                if sh.sensor.id == filter and sh.timestamp >= datetime.now() - timedelta(days=period)
+            # One sensor, as the UI reads it. Raw rows: Pony parses every timestamp with strptime,
+            # which was most of the month read (44,591 rows: 0.45 s on the PC, 12 to 14 s on the Pi).
+            # The primary key (sensor, timestamp) serves the WHERE and the order, as it did for Pony.
+            since = (datetime.now() - timedelta(days=period)).strftime("%Y-%m-%d %H:%M:%S.%f")
+            query = SensorHistory._database_.select(
+                'SELECT "timestamp", "value", "alarm_min", "alarm_max", "limit_min", "limit_max" '
+                'FROM "SensorHistory" WHERE "sensor" = $filter AND "timestamp" >= $since ORDER BY "timestamp"'
             )
+            query = ((datetime.fromisoformat(item[0]),) + tuple(item[1:]) for item in query)
 
         data = []
         for item in query:
