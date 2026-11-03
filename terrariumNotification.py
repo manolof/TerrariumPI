@@ -554,7 +554,8 @@ class terrariumNotificationServiceEmail(terrariumNotificationService):
             if smtp_security is not None:
                 smtp_settings[smtp_security] = True
 
-            if "" != self.setup["username"]:
+            # Log in only over TLS or SSL. The plain try goes without: it would send the username and password in clear.
+            if smtp_security is not None and "" != self.setup["username"]:
                 smtp_settings["user"] = self.setup["username"]
                 smtp_settings["password"] = self.setup["password"]
 

@@ -210,3 +210,18 @@ def test_test_message_needs_a_loaded_enabled_service(notification_module, sensor
         notification.test_message("mail-3")
     with pytest.raises(notification_module.terrariumNotificationServiceException):
         notification.test_message("never-stored")
+
+
+def test_the_plain_attempt_carries_no_credentials(notification_module, sensor_db):
+    notification = _mail_service(notification_module)
+    patch, message = _sent_with(notification_module, 535)
+
+    with patch, pytest.raises(notification_module.terrariumNotificationServiceException):
+        notification.test_message("mail-3")
+
+    attempts = [c.kwargs["smtp"] for c in message.send.call_args_list]
+    assert [("tls" in smtp, "ssl" in smtp) for smtp in attempts] == [(True, False), (False, True), (False, False)]
+    # TLS and SSL log in. Without either, the username and password would cross the network in clear text.
+    # (terrariumUtils.decrypt is a stub here, so the stored values are not compared)
+    assert all("user" in smtp and "password" in smtp for smtp in attempts[:2])
+    assert "user" not in attempts[2] and "password" not in attempts[2]
