@@ -27,6 +27,7 @@ import statistics
 import sdnotify
 import gettext
 import socket
+import uuid
 
 from concurrent import futures
 from pathlib import Path
@@ -36,7 +37,17 @@ from pyfancy.pyfancy import pyfancy
 from func_timeout import func_timeout, FunctionTimedOut
 
 from pony import orm
-from terrariumDatabase import init as init_db, db, Setting, Sensor, Relay, Webcam, Enclosure, Area
+from terrariumDatabase import (
+    init as init_db,
+    db,
+    Setting,
+    Sensor,
+    Relay,
+    Webcam,
+    Enclosure,
+    Area,
+    NotificationMessage,
+)
 from terrariumWebserver import terrariumWebserver
 from terrariumUtils import terrariumUtils, terrariumAsync, terrariumCache
 from terrariumEnclosure import terrariumEnclosure
@@ -153,12 +164,16 @@ class terrariumEngine(object):
 
         # Alert rule for sensor mails and quiet time for error mails. Read once, here.
         self._load_alerts()
+        try:
+            self._ensure_recovered_message()
+        except Exception as ex:
+            logger.warning(f"The sensor_recovered notification message could not be added ({type(ex).__name__}).")
 
         # Notification system
         self.notification = terrariumNotification(self)
         self.notification.engine = self
         self.notification.load_services()
-        self.notification.broadcast(startup_message, startup_message, self.settings["profile_image"])
+        self._broadcast(startup_message)
 
         # Load Web server, as we need it for websocket communication (even when the web server is not yet started)
         self.webserver = terrariumWebserver(self)
@@ -216,7 +231,7 @@ class terrariumEngine(object):
 
         startup_message = f'TerrariumPI {self.version} is up and running at address: http://{socket.getfqdn()}:{self.settings["port"]} in {time.time()-self.starttime:.2f} seconds.'
         logger.info(startup_message)
-        self.notification.broadcast(startup_message, startup_message, self.settings["profile_image"])
+        self._broadcast(startup_message)
 
         # Return console logging back to 'normal'
         terrariumLogging.logging.getLogger().handlers[0].setLevel(old_log_level)
@@ -709,6 +724,35 @@ class terrariumEngine(object):
         settings = load_alert_settings(raw)
         self.alerts = AlertTracker(settings, clock)
         self.quiet_errors = QuietErrors(settings["quiet_minutes"], clock)
+
+    # Text of the sensor_recovered message made from the sensor_alarm one
+    _RECOVERED_TITLE = "Sensor {name} is back in limits"
+    _RECOVERED_TEXT = "Sensor {name} is back in limits at {value}{unit}, after {out_minutes} minutes out of limits."
+
+    def _ensure_recovered_message(self) -> None:
+        # A data row, no schema change: the recovery mail goes where the alarm mail goes, with its on or off switch
+        with orm.db_session():
+            if NotificationMessage.select(lambda nm: nm.type == "sensor_recovered").exists():
+                return
+            alarms = NotificationMessage.select(lambda nm: nm.type == "sensor_alarm")
+            alarm = alarms.order_by(NotificationMessage.id).first()
+            if alarm is None:
+                return
+            NotificationMessage(
+                id=str(uuid.uuid4()),
+                type="sensor_recovered",
+                title=self._RECOVERED_TITLE,
+                message=self._RECOVERED_TEXT,
+                rate_limit=alarm.rate_limit,
+                enabled=alarm.enabled,
+                services=list(alarm.services),
+            )
+        logger.info("Added the sensor_recovered notification message, with the services of the sensor_alarm one.")
+
+    def _broadcast(self, message: str) -> None:
+        # Start-up and stop mails, unless mail.start_stop is off
+        if self.alerts.settings["mail"]["start_stop"]:
+            self.notification.broadcast(message, message, self.settings["profile_image"])
 
     def _sensor_alert(self, sensor_data) -> None:
         # Out is an alarm or a sensor that stopped reading. The tracker decides if a mail goes out.
@@ -1969,7 +2013,7 @@ class terrariumEngine(object):
             logger.info(f"Stopped {self.webcams[webcam]}")
 
         shutdown_message = f"Stopped TerrariumPI {self.version} after running for {terrariumUtils.format_uptime(time.time()-self.starttime)}. Bye bye."
-        self.notification.broadcast(shutdown_message, shutdown_message, self.settings["profile_image"])
+        self._broadcast(shutdown_message)
         self.notification.stop()
 
         self.__engine["asyncio"].stop()

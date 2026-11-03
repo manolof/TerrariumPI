@@ -23,7 +23,8 @@ DEFAULTS = {
     "quiet_minutes": 60,
     "recovery": True,
     "sensors": {},
-    "mail": {"alerts": True, "errors": True, "start_stop": False},
+    # start_stop is on, so the start-up and stop mails go out as before unless the owner turns them off
+    "mail": {"alerts": True, "errors": True, "start_stop": True},
 }
 
 # An episode ends only after this long back in limits

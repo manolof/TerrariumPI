@@ -158,7 +158,8 @@ def test_defaults_are_the_brief_values():
         "quiet_minutes": 60,
         "recovery": True,
         "sensors": {},
-        "mail": {"alerts": True, "errors": True, "start_stop": False},
+        # start_stop True by controller ruling: today's start and stop mails stay unless turned off
+        "mail": {"alerts": True, "errors": True, "start_stop": True},
     }
     assert load_alert_settings(None) == DEFAULTS
     assert load_alert_settings("") == DEFAULTS
@@ -172,7 +173,7 @@ def test_stored_json_is_merged_with_defaults():
     assert value["delay_minutes"] == 15
     assert value["quiet_minutes"] == 60
     assert value["recovery"] is True
-    assert value["mail"] == {"alerts": True, "errors": False, "start_stop": False}
+    assert value["mail"] == {"alerts": True, "errors": False, "start_stop": True}
     assert value["sensors"] == {"s1": {"quiet_minutes": 120}}
 
 
@@ -311,3 +312,92 @@ def test_engine_reads_the_settings_row_at_start(sensor_db):
     engine._load_alerts()
     assert engine.alerts.settings["delay_minutes"] == 10
     assert engine.quiet_errors.quiet_minutes == 90
+
+
+# Start and stop broadcasts follow mail.start_stop
+
+
+def broadcast_engine(stored):
+    engine = terrariumEngine.terrariumEngine.__new__(terrariumEngine.terrariumEngine)
+    engine.alerts = AlertTracker(load_alert_settings(stored), Clock())
+    engine.notification = mock.MagicMock()
+    engine.settings = {"profile_image": "img.jpg"}
+    return engine
+
+
+def test_start_stop_mails_are_on_by_default():
+    assert DEFAULTS["mail"]["start_stop"] is True
+    engine = broadcast_engine(None)
+    engine._broadcast("Starting up")
+    engine.notification.broadcast.assert_called_once_with("Starting up", "Starting up", "img.jpg")
+
+
+def test_start_stop_off_sends_no_broadcast():
+    engine = broadcast_engine(json.dumps({"mail": {"start_stop": False}}))
+    engine._broadcast("Starting up")
+    engine.notification.broadcast.assert_not_called()
+
+
+# The sensor_recovered message is made from the sensor_alarm one, once
+
+
+def add_mail_service(service_id):
+    from terrariumDatabase import NotificationService
+
+    return NotificationService(id=service_id, type="email", name="Mail", enabled=True, setup={})
+
+
+def messages(message_type):
+    from terrariumDatabase import NotificationMessage
+
+    with orm.db_session():
+        return [
+            {
+                "title": m.title,
+                "message": m.message,
+                "enabled": m.enabled,
+                "services": sorted(s.id for s in m.services),
+            }
+            for m in NotificationMessage.select(lambda nm: nm.type == message_type)
+        ]
+
+
+def test_recovered_message_is_made_from_the_alarm_message(sensor_db):
+    from terrariumDatabase import NotificationMessage
+
+    with orm.db_session():
+        services = [add_mail_service("mail-a"), add_mail_service("mail-b")]
+        NotificationMessage(id="alarm-1", type="sensor_alarm", title="T", message="M", enabled=False, services=services)
+
+    engine = terrariumEngine.terrariumEngine.__new__(terrariumEngine.terrariumEngine)
+    engine._ensure_recovered_message()
+    engine._ensure_recovered_message()
+
+    made = messages("sensor_recovered")
+    assert len(made) == 1
+    assert made[0]["enabled"] is False
+    assert made[0]["services"] == ["mail-a", "mail-b"]
+    assert "{out_minutes}" in made[0]["message"] and "{name}" in made[0]["title"]
+    # The text formats with the data the engine sends
+    made[0]["title"].format(name="Warm side", value=24.0, unit="C", out_minutes=31)
+    made[0]["message"].format(name="Warm side", value=24.0, unit="C", out_minutes=31)
+
+
+def test_an_existing_recovered_message_is_kept(sensor_db):
+    from terrariumDatabase import NotificationMessage
+
+    with orm.db_session():
+        service = add_mail_service("mail-c")
+        NotificationMessage(id="alarm-2", type="sensor_alarm", title="T", message="M", services=[service])
+        NotificationMessage(id="rec-2", type="sensor_recovered", title="Mine", message="Own text", services=[])
+
+    engine = terrariumEngine.terrariumEngine.__new__(terrariumEngine.terrariumEngine)
+    engine._ensure_recovered_message()
+
+    assert messages("sensor_recovered") == [{"title": "Mine", "message": "Own text", "enabled": True, "services": []}]
+
+
+def test_no_alarm_message_makes_no_recovered_message(sensor_db):
+    engine = terrariumEngine.terrariumEngine.__new__(terrariumEngine.terrariumEngine)
+    engine._ensure_recovered_message()
+    assert messages("sensor_recovered") == []
