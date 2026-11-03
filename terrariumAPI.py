@@ -28,6 +28,7 @@ from terrariumDatabase import (
     Webcam,
 )
 from terrariumEnclosure import terrariumEnclosure
+from terrariumManage import terrariumManage
 from terrariumNotification import terrariumNotification, terrariumNotificationService
 
 from hardware.relay import terrariumRelay
@@ -63,6 +64,9 @@ class terrariumAPI(object):
 
     def routes(self, bottle_app) -> None:
         bottle_app.install(JSONPlugin(json_dumps=partial(json.dumps, default=json_serial)))
+
+        # Manage API, before the generic routes below
+        terrariumManage(self.webserver).routes(bottle_app, self.authentication)
 
         # Area API
         bottle_app.route(
