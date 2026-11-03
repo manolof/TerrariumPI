@@ -603,6 +603,9 @@ class terrariumManage(object):
             body = fields(request.json, self.LOCATION_FIELDS[source], self.LOCATION_REQUIRED[source])
 
             if "none" == source:
+                # A weather area with no weather leaves its relays as they are for good (nothing rebuilds the source)
+                if Area.select(lambda a: a.mode in ("weather", "weather_inverse")).exists():
+                    raise ManageError("The lights follow the weather. Give them a timer first.")
                 new_address = ""
 
             elif "openmeteo" == source:

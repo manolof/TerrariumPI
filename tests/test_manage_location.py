@@ -7,7 +7,7 @@ import pytest
 from pony import orm
 
 import terrariumManage
-from terrariumDatabase import Setting
+from terrariumDatabase import Area, Enclosure, Setting
 
 KEY = "FAKEKEY0123456789abcdef012345678"
 OTHER_KEY = "otherkey0123456789abcdef01234567"
@@ -275,3 +275,29 @@ def test_no_log_line_holds_the_key_on_success(manage, caplog):
         put(manage, {"source": "openweathermap", "city": "Amsterdam", "country": "NL", "key": KEY})
         manage.location_get()
     assert KEY not in caplog.text
+
+
+def add_area(mode):
+    with orm.db_session():
+        enclosure = Enclosure.get(id="e1") or Enclosure(id="e1", name="Home")
+        Area(id="lights", enclosure=enclosure, name="Lights", type="lights", mode=mode, setup={})
+
+
+@pytest.mark.parametrize("mode", ["weather", "weather_inverse"])
+def test_none_refused_while_a_weather_area_exists(manage, engine, mode):
+    store(OWM)
+    add_area(mode)
+    weather = engine.weather
+    error = failure(manage, {"source": "none"})
+    assert error.status == 400
+    assert error.body == "The lights follow the weather. Give them a timer first."
+    assert stored() == OWM
+    assert engine.weather is weather
+    engine.load_settings.assert_not_called()
+
+
+def test_none_allowed_with_a_timer_area(manage, engine):
+    store(OWM)
+    add_area("timer")
+    assert put(manage, {"source": "none"})["source"] == "none"
+    assert stored() == ""
