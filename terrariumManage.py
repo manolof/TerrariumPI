@@ -68,6 +68,16 @@ def integer(name: str, value: object, lo: int, hi: int) -> int:
     return int(value)
 
 
+def device_address(value: object) -> str:
+    """The address as the Relay and Sensor address setter stores it: no trailing commas or spaces."""
+    address = text("address", value, 100)
+    address = str(terrariumUtils.clean_address(address) or "")
+    if not address:
+        raise ManageError("Address must not be empty.")
+
+    return address
+
+
 def text(name: str, value: object, max_len: int = 200) -> str:
     if not isinstance(value, str):
         raise ManageError(f"{_label(name)} must be text.")
@@ -1072,9 +1082,10 @@ class terrariumManage(object):
     def _address_taken(entity, address, own_id=None) -> bool:
         """Whether another device of the same kind has this address. Two devices on one address would share one
         hardware object (the driver cache key is hardware plus address), so switching one would drive the other."""
-        wanted = address.strip().casefold()
+        wanted = str(terrariumUtils.clean_address(address)).strip().casefold()
         return any(
-            row.id != own_id and str(row.address).strip().casefold() == wanted for row in entity.select()
+            row.id != own_id and str(terrariumUtils.clean_address(row.address)).strip().casefold() == wanted
+            for row in entity.select()
         )
 
     @classmethod
@@ -1100,7 +1111,7 @@ class terrariumManage(object):
                 raise ManageError("That hardware does not measure this type.")
 
             name = text("name", body["name"])
-            address = text("address", body["address"], 100)
+            address = device_address(body["address"])
         except ManageError as ex:
             raise HTTPError(status=400, body=str(ex))
 
@@ -1160,7 +1171,7 @@ class terrariumManage(object):
                 changes["name"] = text("name", body["name"])
 
             if "address" in body:
-                changes["address"] = text("address", body["address"], 100)
+                changes["address"] = device_address(body["address"])
         except ManageError as ex:
             raise HTTPError(status=400, body=str(ex))
 

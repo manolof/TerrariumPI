@@ -1,4 +1,5 @@
 """/api/manage/devices/ with the real Pony in-memory database and fake hardware classes."""
+import re
 import sys
 from types import SimpleNamespace
 from unittest import mock
@@ -92,11 +93,18 @@ def engine():
     return engine
 
 
+def real_clean_address(address):
+    """terrariumUtils is a MagicMock in the tests: the same cleaning as the real one."""
+    return None if address is None else re.sub(r"[ ,]+$", "", str(address))
+
+
 @pytest.fixture
 def manage(engine, created, sensor_db):
     with mock.patch.object(terrariumManage, "HTTPError", FakeHTTPError), mock.patch.object(
         terrariumManage, "terrariumSensor", fake_sensor_class(created)
-    ), mock.patch.object(terrariumManage, "terrariumRelay", fake_relay_class(created)):
+    ), mock.patch.object(terrariumManage, "terrariumRelay", fake_relay_class(created)), mock.patch.object(
+        terrariumManage.terrariumUtils, "clean_address", real_clean_address, create=True
+    ):
         yield terrariumManage.terrariumManage(SimpleNamespace(engine=engine))
 
 
@@ -472,3 +480,30 @@ def test_delete_engine_failure_keeps_row(manage, engine, house):
     assert err.body == "The device could not be deleted. See the engine log."
     with orm.db_session():
         assert Relay.exists(id="spare-relay")
+
+
+def test_put_address_with_a_trailing_comma_matches_the_same_address(manage, engine, house):
+    err = fail(manage, "device_put", {"address": "5,"}, "relays", "spare-relay")
+    assert err.status == 409 and err.body == "Another device already uses that address."
+    engine.update.assert_not_called()
+    with orm.db_session():
+        assert Relay["spare-relay"].address == "8"
+
+
+def test_add_address_with_a_trailing_comma_matches_the_same_address(manage, engine, house):
+    err = fail(manage, "device_add", {"hardware": "gpio", "name": "x", "address": "5, "}, "relays")
+    assert err.status == 409 and err.body == "Another device already uses that address."
+    engine.add.assert_not_called()
+
+
+def test_put_stores_the_cleaned_address(manage, engine, house):
+    result = call(manage, "device_put", {"address": "9,"}, "relays", "spare-relay")
+    assert result["address"] == "9"
+    with orm.db_session():
+        assert Relay["spare-relay"].address == "9"
+    assert engine.update.call_args.kwargs["address"] == "9"
+
+
+def test_an_address_of_only_commas_is_refused(manage, engine, house):
+    assert fail(manage, "device_put", {"address": ",,"}, "relays", "spare-relay").status == 400
+    assert fail(manage, "device_add", {"hardware": "gpio", "name": "x", "address": ","}, "relays").status == 400
