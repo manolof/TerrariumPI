@@ -766,10 +766,14 @@ class terrariumManage(object):
         orm.commit()
 
         engine = self.webserver.engine
-        if source != old_source:
-            # A weather object keeps the kind of source it was built for, so a change of kind builds a new one
+        if "none" == source and source != old_source:
+            # No source: nothing builds a weather object, so the old one goes. A weather area can not exist here
+            # (refused above), so no area plans from it.
             engine.weather = None
             engine._weather_failed = False
+        # Any other source: load_settings builds the new weather object, of the kind the address needs, and sets it in
+        # one assignment. Until then the engine loop keeps the old one, so it never meets None between its check and
+        # its update().
 
         try:
             engine.load_settings()

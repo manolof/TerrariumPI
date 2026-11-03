@@ -235,10 +235,20 @@ def test_reload_sees_the_stored_address(manage, engine):
     assert seen == ["https://api.open-meteo.com/v1/forecast?latitude=1.000000&longitude=2.000000"]
 
 
-def test_changing_source_type_builds_a_fresh_weather(manage, engine):
+def test_changing_source_type_leaves_the_swap_to_the_reload(manage, engine):
+    # load_settings builds the new weather object, of the new kind, and sets it in one assignment. Until then the
+    # engine loop keeps the old one: it must never meet None between its check and its update().
     store(OWM)
+    old = engine.weather
+    seen = []
+    engine.load_settings.side_effect = lambda: seen.append(engine.weather)
     put(manage, {"source": "openmeteo", "latitude": 1, "longitude": 2})
-    assert engine.weather is None
+    assert seen == [old]
+    assert engine.weather is old
+
+    seen.clear()
+    put(manage, {"source": "openweathermap", "city": "Amsterdam", "country": "NL", "key": KEY})
+    assert seen == [old]
 
 
 def test_same_source_type_keeps_the_weather_object(manage, engine):
