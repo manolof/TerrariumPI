@@ -5,6 +5,8 @@ logger = terrariumLogging.logging.getLogger(__name__)
 
 import json
 import math
+import re
+import urllib.parse
 
 from pony import orm
 from bottle import request, HTTPError
@@ -12,6 +14,7 @@ from bottle import request, HTTPError
 from terrariumArea import terrariumArea
 from terrariumAlerts import load_alert_settings
 from terrariumDatabase import Area, Sensor, Setting
+from terrariumUtils import terrariumUtils
 from hardware.sensor import terrariumSensor
 
 
@@ -198,6 +201,20 @@ class terrariumManage(object):
             self.alerts_put,
             apply=auth(),
             name="api:manage_alerts_put",
+        )
+        bottle_app.route(
+            "/api/manage/location/",
+            "GET",
+            self.location_get,
+            apply=auth(False),
+            name="api:manage_location_get",
+        )
+        bottle_app.route(
+            "/api/manage/location/",
+            "PUT",
+            self.location_put,
+            apply=auth(),
+            name="api:manage_location_put",
         )
 
     @staticmethod
@@ -505,3 +522,145 @@ class terrariumManage(object):
         engine.quiet_errors.quiet_minutes = settings["quiet_minutes"]
 
         return self._alerts_body(settings)
+
+    # --- location and weather ---
+    # The same patterns as weather/openweathermap_org_weather.py and weather/openmeteo_com_weather.py (VALID_SOURCE).
+    # They are copied because the weather package is not importable in the test harness.
+    OWM_SOURCE = r"^https?:\/\/api\.openweathermap\.org\/data\/2\.5\/weather\?(q=(?P<city>[^,&]+),(?P<country>[^,&]{2,3})|id=(?P<id>\d+))&appid=(?P<appid>[a-z0-9]{32})$"
+    METEO_SOURCE = r"^https?:\/\/api\.open-meteo\.com\/v1\/forecast\?latitude=(?P<lat>-?\d+(\.\d+)?)&longitude=(?P<long>-?\d+(\.\d+)?)(?:&.*)?$"
+    LOCATION_SOURCES = {"openweathermap", "openmeteo", "none"}
+    LOCATION_FIELDS = {
+        "openweathermap": {"source", "city", "country", "key"},
+        "openmeteo": {"source", "latitude", "longitude"},
+        "none": {"source"},
+    }
+    LOCATION_REQUIRED = {
+        "openweathermap": {"source", "city", "country"},
+        "openmeteo": {"source", "latitude", "longitude"},
+        "none": {"source"},
+    }
+
+    @staticmethod
+    def _location_address() -> str:
+        row = Setting.get(id="weather_source")
+        if row is None or not row.value:
+            return ""
+
+        return str(terrariumUtils.decrypt(row.value) or "")
+
+    @classmethod
+    def _location_parse(cls, address: str) -> dict:
+        """The location fields of a stored address. Never holds the key, only whether there is one."""
+        body = {
+            "source": "none",
+            "city": None,
+            "country": None,
+            "latitude": None,
+            "longitude": None,
+            "key_set": False,
+        }
+
+        found = re.search(cls.OWM_SOURCE, address, re.IGNORECASE)
+        if found:
+            body["source"] = "openweathermap"
+            body["key_set"] = True
+            if found.group("city") is not None:
+                body["city"] = urllib.parse.unquote_plus(found.group("city"))
+                body["country"] = found.group("country")
+            return body
+
+        found = re.search(cls.METEO_SOURCE, address, re.IGNORECASE)
+        if found:
+            body["source"] = "openmeteo"
+            body["latitude"] = float(found.group("lat"))
+            body["longitude"] = float(found.group("long"))
+
+        return body
+
+    @classmethod
+    def _location_stored_key(cls, address: str):
+        found = re.search(cls.OWM_SOURCE, address, re.IGNORECASE)
+        return None if found is None else found.group("appid")
+
+    @orm.db_session()
+    def location_get(self):
+        return self._location_parse(self._location_address())
+
+    @orm.db_session()
+    def location_put(self):
+        address = self._location_address()
+        old_source = self._location_parse(address)["source"]
+        key = None
+
+        try:
+            if not isinstance(request.json, dict):
+                raise ManageError("The request must be a set of fields.")
+
+            source = request.json.get("source")
+            if source not in self.LOCATION_SOURCES:
+                raise ManageError("Source must be OpenWeatherMap, Open-Meteo or none.")
+
+            body = fields(request.json, self.LOCATION_FIELDS[source], self.LOCATION_REQUIRED[source])
+
+            if "none" == source:
+                new_address = ""
+
+            elif "openmeteo" == source:
+                latitude = number("latitude", body["latitude"], -90, 90)
+                longitude = number("longitude", body["longitude"], -180, 180)
+                new_address = f"https://api.open-meteo.com/v1/forecast?latitude={latitude:.6f}&longitude={longitude:.6f}"
+
+            else:
+                city = text("city", body["city"])
+                if re.search(r"[,&=?#]", city):
+                    raise ManageError("City must not contain , & = ? or #.")
+
+                country = body["country"]
+                if not isinstance(country, str) or not re.fullmatch(r"[A-Za-z]{2,3}", country):
+                    raise ManageError("Country must be a code of two or three letters.")
+
+                if "key" in body:
+                    key = body["key"]
+                    if not isinstance(key, str) or not re.fullmatch(r"[A-Za-z0-9]{32}", key):
+                        raise ManageError("Weather key must be 32 letters and digits.")
+                else:
+                    key = self._location_stored_key(address)
+                    if key is None:
+                        raise ManageError("A weather key is needed for OpenWeatherMap.")
+
+                new_address = (
+                    f"https://api.openweathermap.org/data/2.5/weather?q={urllib.parse.quote(city, safe='')},{country}&appid={key}"
+                )
+
+            if new_address:
+                pattern = self.OWM_SOURCE if "openweathermap" == source else self.METEO_SOURCE
+                if not re.search(pattern, new_address, re.IGNORECASE):
+                    raise ManageError("This location can not be used as a weather source.")
+        except ManageError as ex:
+            raise HTTPError(status=400, body=str(ex))
+
+        row = Setting.get(id="weather_source")
+        if row is None:
+            Setting(id="weather_source", value=new_address)
+        else:
+            row.value = new_address
+        orm.commit()
+
+        engine = self.webserver.engine
+        if source != old_source:
+            # A weather object keeps the kind of source it was built for, so a change of kind builds a new one
+            engine.weather = None
+            engine._weather_failed = False
+
+        try:
+            engine.load_settings()
+        except Exception as ex:
+            # The message of a weather fault can hold the address, and that holds the key
+            message = str(ex)
+            for secret in (key, new_address, self._location_stored_key(new_address)):
+                if secret:
+                    message = message.replace(secret, "***")
+            logger.error(f"Reloading the weather source failed ({type(ex).__name__}): {message}")
+            raise HTTPError(status=500, body="The location was saved, but the weather source could not be reloaded.")
+
+        return self._location_parse(new_address)

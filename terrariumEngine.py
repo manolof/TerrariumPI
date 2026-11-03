@@ -325,7 +325,9 @@ class terrariumEngine(object):
                 else:
                     settings[setting["id"]] = setting["value"]
 
-                logger.debug(f"Loaded setting: {setting['id']} with value: {setting['value']}")
+                # Sensitive values are decrypted by now: the weather address holds its key, so none of these are logged
+                shown = "***" if setting["id"] in Setting.ENCRYPTED_FIELDS and setting["value"] else setting["value"]
+                logger.debug(f"Loaded setting: {setting['id']} with value: {shown}")
 
         settings["exclude_ids"] = [] if "" == settings["exclude_ids"] else settings["exclude_ids"].split(",")
         # Force port number to an int.....
