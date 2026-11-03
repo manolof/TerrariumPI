@@ -334,6 +334,22 @@ def test_failed_test_mail_still_counts_for_the_limit(manage, engine, clock):
     assert err.value.status == 429
 
 
+def test_test_mail_loads_a_service_the_classic_ui_turned_on(manage, engine):
+    add_service()
+    order = []
+    engine.notification.load_services.side_effect = lambda: order.append("load")
+    engine.notification.test_message.side_effect = lambda service_id: order.append("test")
+    assert manage.email_test() == {"sent": True}
+    assert order == ["load", "test"]
+
+
+def test_test_mail_does_not_reload_a_loaded_service(manage, engine):
+    add_service()
+    engine.notification.services["mail"] = object()
+    manage.email_test()
+    engine.notification.load_services.assert_not_called()
+
+
 def test_test_mail_off_or_missing(manage, engine):
     with pytest.raises(FakeHTTPError) as err:
         manage.email_test()

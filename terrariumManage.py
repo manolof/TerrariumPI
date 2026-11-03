@@ -920,7 +920,11 @@ class terrariumManage(object):
         secrets = self._email_secrets(service)
 
         try:
-            self.webserver.engine.notification.test_message(service.id)
+            notification = self.webserver.engine.notification
+            if notification.services.get(service.id) is None:
+                # The classic UI turned the service on after the engine started
+                notification.load_services()
+            notification.test_message(service.id)
         except Exception as ex:
             logger.error(f"The test mail could not be sent ({type(ex).__name__}): {self._mask(str(ex), secrets)}")
             raise HTTPError(status=500, body="The test mail could not be sent. See the engine log.") from None
