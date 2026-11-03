@@ -30,17 +30,19 @@ DEFAULTS = {
 # An episode ends only after this long back in limits
 RESET_SECONDS = 5 * 60
 
-_TIMING = ("delay_minutes", "quiet_minutes")
+# Allowed minutes, inclusive (the constraints). A quiet time of 0 would mail every update; an endless delay
+# would never mail. NaN and Infinity (json.loads accepts both) fail the range check.
+_TIMING = {"delay_minutes": (1, 720), "quiet_minutes": (10, 1440)}
 
 
-def _is_number(value) -> bool:
+def _in_range(value, low: float, high: float) -> bool:
     # True is an int in Python: it is not a number of minutes
-    return isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and low <= value <= high
 
 
 def _valid(key: str, value) -> bool:
     if key in _TIMING:
-        return _is_number(value)
+        return _in_range(value, *_TIMING[key])
     if key == "recovery":
         return isinstance(value, bool)
     return False

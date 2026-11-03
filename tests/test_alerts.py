@@ -401,3 +401,51 @@ def test_no_alarm_message_makes_no_recovered_message(sensor_db):
     engine = terrariumEngine.terrariumEngine.__new__(terrariumEngine.terrariumEngine)
     engine._ensure_recovered_message()
     assert messages("sensor_recovered") == []
+
+
+# Out-of-range timing keeps the default: the loader is the last guard against a hand-edited row
+
+RANGES = {"delay_minutes": (1, 720), "quiet_minutes": (10, 1440)}
+BAD = {
+    "delay_minutes": ["0", "Infinity", "-Infinity", "NaN", "1e9", "721", "0.5", "-1"],
+    "quiet_minutes": ["0", "Infinity", "NaN", "1e9", "1441", "9"],
+}
+
+
+def warnings_naming(caplog, text):
+    return [r for r in caplog.records if r.levelno == logging.WARNING and text in r.getMessage()]
+
+
+@pytest.mark.parametrize("key,raw_value", [(k, v) for k, values in BAD.items() for v in values])
+def test_out_of_range_timing_falls_back_to_default(key, raw_value, caplog):
+    with caplog.at_level(logging.WARNING):
+        value = load_alert_settings('{"%s": %s}' % (key, raw_value))
+    assert value[key] == DEFAULTS[key]
+    assert len([r for r in caplog.records if r.levelno == logging.WARNING]) == 1
+    assert len(warnings_naming(caplog, key)) == 1
+
+
+@pytest.mark.parametrize("key,raw_value", [(k, v) for k, values in BAD.items() for v in values])
+def test_out_of_range_override_is_dropped(key, raw_value, caplog):
+    with caplog.at_level(logging.WARNING):
+        value = load_alert_settings('{"sensors": {"s1": {"%s": %s, "recovery": false}}}' % (key, raw_value))
+    assert value["sensors"] == {"s1": {"recovery": False}}
+    assert len([r for r in caplog.records if r.levelno == logging.WARNING]) == 1
+    assert len(warnings_naming(caplog, f"sensors.s1.{key}")) == 1
+
+
+@pytest.mark.parametrize("key", list(RANGES))
+def test_timing_range_edges_are_kept(key, caplog):
+    low, high = RANGES[key]
+    with caplog.at_level(logging.WARNING):
+        for edge in (low, high):
+            assert load_alert_settings(json.dumps({key: edge}))[key] == edge
+            override = load_alert_settings(json.dumps({"sensors": {"s1": {key: edge}}}))
+            assert override["sensors"] == {"s1": {key: edge}}
+    assert [r for r in caplog.records if r.levelno == logging.WARNING] == []
+
+
+def test_zero_quiet_time_stored_does_not_spam(clock):
+    tracker = AlertTracker(load_alert_settings('{"quiet_minutes": 0}'), clock)
+    sent = run(tracker, clock, [(0, 89 * MIN + 1, True)])
+    assert sent == {30 * MIN: "alarm"}
