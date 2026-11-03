@@ -118,6 +118,8 @@ def test_graph_range_needs_only_low_below_high(manage, temp):
 
 
 def test_temperature_range(manage, temp):
+    # The valid range must reach 2 beyond the alarm limits, so it is widened first
+    put(manage, temp, {"limit_min": 0, "limit_max": 50})
     assert status_of(manage, temp, {"alarm_min": 9.9}) == 400
     put(manage, temp, {"alarm_min": 10})
     put(manage, temp, {"alarm_max": 40})
@@ -125,10 +127,77 @@ def test_temperature_range(manage, temp):
 
 
 def test_humidity_range(manage, humid):
+    put(manage, humid, {"limit_min": 0, "limit_max": 110})
     assert status_of(manage, humid, {"alarm_min": 19.9}) == 400
     put(manage, humid, {"alarm_min": 20})
     put(manage, humid, {"alarm_max": 100})
     assert status_of(manage, humid, {"alarm_max": 100.1}) == 400
+
+
+# --- the valid range (limit_min/limit_max) is the engine's filter for readings ---
+VALID_RANGE_MESSAGE = "The valid range must reach at least 2 beyond the alarm limits, at night too."
+
+
+@pytest.fixture
+def heat_area(sensor_db, temp):
+    from terrariumDatabase import Area, Enclosure
+
+    with orm.db_session():
+        enclosure = Enclosure(id="enc", name="Ludwig")
+        Area(
+            id="a-heat",
+            enclosure=enclosure,
+            name="Heat",
+            type="heating",
+            mode="sensors",
+            setup={"sensors": [temp], "day_night_difference": -2, "low": {"relays": []}, "high": {"relays": []}},
+        )
+    return "a-heat"
+
+
+def refused(manage, sensor, body):
+    with pytest.raises(FakeHTTPError) as err:
+        put(manage, sensor, body)
+    assert err.value.status == 400
+    assert err.value.body == VALID_RANGE_MESSAGE
+
+
+def test_narrow_valid_range_with_night_difference_is_refused(manage, temp, heat_area):
+    refused(manage, temp, {"limit_min": 20, "limit_max": 30})
+    data = manage.sensor_get(temp)
+    assert (data["limit_min"], data["limit_max"]) == (10, 40)
+
+
+def test_valid_range_two_beyond_the_night_shift_is_accepted(manage, temp, heat_area):
+    put(manage, temp, {"limit_min": 18, "limit_max": 32})
+    data = manage.sensor_get(temp)
+    assert (data["limit_min"], data["limit_max"]) == (18, 32)
+
+
+def test_valid_range_without_an_area_needs_two_beyond(manage, temp):
+    refused(manage, temp, {"limit_min": 21})
+    put(manage, temp, {"limit_min": 20, "limit_max": 30})
+    assert manage.sensor_get(temp)["limit_min"] == 20
+
+
+def test_alarm_put_that_crosses_a_stored_limit_is_refused(manage, temp, heat_area):
+    put(manage, temp, {"limit_min": 18, "limit_max": 32})
+    refused(manage, temp, {"alarm_max": 29})
+    refused(manage, temp, {"alarm_min": 21, "alarm_max": 27.5, "limit_min": 20})
+    data = manage.sensor_get(temp)
+    assert (data["alarm_min"], data["alarm_max"]) == (22, 28)
+
+
+def test_alarm_and_valid_range_moved_together(manage, temp, heat_area):
+    put(manage, temp, {"alarm_min": 24, "alarm_max": 30, "limit_min": 20, "limit_max": 34})
+    data = manage.sensor_get(temp)
+    assert (data["alarm_min"], data["alarm_max"], data["limit_min"], data["limit_max"]) == (24, 30, 20, 34)
+
+
+def test_name_put_does_not_check_the_valid_range(manage, temp):
+    with orm.db_session():
+        Sensor[temp].limit_min = 21
+    assert put(manage, temp, {"name": "Cool"})["name"] == "Cool"
 
 
 def test_offset_range(manage, temp):

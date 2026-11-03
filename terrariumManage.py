@@ -318,6 +318,29 @@ class terrariumManage(object):
             "notification": bool(sensor.notification),
         }
 
+    @staticmethod
+    def _night_difference(sensor_id) -> float:
+        """The largest day/night difference of the areas that use the sensor, as a size. 0 when none does."""
+        largest = 0
+        for area in Area.select():
+            setup = area.setup if isinstance(area.setup, dict) else {}
+            if sensor_id in terrariumManage._id_list(setup.get("sensors")):
+                difference = _stored_number(setup.get("day_night_difference", 0)) or 0
+                largest = max(largest, abs(difference))
+        return largest
+
+    @classmethod
+    def _check_valid_range(cls, sensor, changes: dict) -> None:
+        """limit_min and limit_max are the engine's filter for valid readings: a reading outside them is thrown away,
+        the sensor errors and Heat is held off. They must reach 2 beyond the alarm limits, shifted for the night."""
+        alarm_min = changes.get("alarm_min", sensor.alarm_min)
+        alarm_max = changes.get("alarm_max", sensor.alarm_max)
+        limit_min = changes.get("limit_min", sensor.limit_min)
+        limit_max = changes.get("limit_max", sensor.limit_max)
+        margin = cls._night_difference(sensor.id) + 2
+        if not (limit_min <= alarm_min - margin and limit_max >= alarm_max + margin):
+            raise ManageError("The valid range must reach at least 2 beyond the alarm limits, at night too.")
+
     @orm.db_session()
     def sensor_get(self, sensor):
         try:
@@ -345,6 +368,9 @@ class terrariumManage(object):
 
             changes.update(pair("alarm_min", "alarm_max", body, sensor.alarm_min, sensor.alarm_max, SENSOR_RANGES.get(sensor.type)))
             changes.update(pair("limit_min", "limit_max", body, sensor.limit_min, sensor.limit_max))
+
+            if any(name in changes for name in ("alarm_min", "alarm_max", "limit_min", "limit_max")):
+                self._check_valid_range(sensor, changes)
 
             if "offset" in body:
                 value = number("offset", body["offset"], -10, 10)
