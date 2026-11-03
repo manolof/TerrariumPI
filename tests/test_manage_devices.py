@@ -507,3 +507,40 @@ def test_put_stores_the_cleaned_address(manage, engine, house):
 def test_an_address_of_only_commas_is_refused(manage, engine, house):
     assert fail(manage, "device_put", {"address": ",,"}, "relays", "spare-relay").status == 400
     assert fail(manage, "device_add", {"hardware": "gpio", "name": "x", "address": ","}, "relays").status == 400
+
+
+# --- delete with history ---
+def test_delete_removes_history_without_loading_it(manage, engine, house):
+    from datetime import datetime, timedelta
+
+    from terrariumDatabase import RelayHistory, SensorHistory
+
+    start = datetime(2026, 11, 1)
+    with orm.db_session():
+        for minute in range(50):
+            when = start + timedelta(minutes=minute)
+            SensorHistory(
+                sensor=Sensor["spare"], timestamp=when, value=70, limit_min=0, limit_max=100, alarm_min=60, alarm_max=90
+            )
+            SensorHistory(
+                sensor=Sensor["temp1"], timestamp=when, value=25, limit_min=0, limit_max=100, alarm_min=22, alarm_max=28
+            )
+            RelayHistory(relay=Relay["spare-relay"], timestamp=when, value=0, wattage=0, flow=0)
+            RelayHistory(relay=Relay["heat"], timestamp=when, value=0, wattage=0, flow=0)
+
+    real_sensor_delete = SensorHistory._delete_
+    real_relay_delete = RelayHistory._delete_
+    with mock.patch.object(SensorHistory, "_delete_", autospec=True, side_effect=real_sensor_delete) as sensor_rows, \
+            mock.patch.object(RelayHistory, "_delete_", autospec=True, side_effect=real_relay_delete) as relay_rows:
+        assert call(manage, "device_delete", None, "sensors", "spare") == {"deleted": "spare"}
+        assert call(manage, "device_delete", None, "relays", "spare-relay") == {"deleted": "spare-relay"}
+
+    # Pony did not load the rows one by one: one bulk DELETE did it
+    assert sensor_rows.call_count == 0
+    assert relay_rows.call_count == 0
+    with orm.db_session():
+        assert SensorHistory.select(lambda h: h.sensor.id == "spare").count() == 0
+        assert RelayHistory.select(lambda h: h.relay.id == "spare-relay").count() == 0
+        # Other devices keep theirs
+        assert SensorHistory.select(lambda h: h.sensor.id == "temp1").count() == 50
+        assert RelayHistory.select(lambda h: h.relay.id == "heat").count() == 50

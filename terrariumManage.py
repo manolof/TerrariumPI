@@ -15,7 +15,7 @@ from bottle import request, HTTPError
 
 from terrariumArea import terrariumArea
 from terrariumAlerts import load_alert_settings
-from terrariumDatabase import Area, NotificationService, Relay, Sensor, Setting
+from terrariumDatabase import Area, NotificationService, Relay, RelayHistory, Sensor, SensorHistory, Setting
 from terrariumUtils import terrariumUtils
 from hardware.relay import terrariumRelay
 from hardware.sensor import terrariumSensor
@@ -1243,6 +1243,12 @@ class terrariumManage(object):
 
         try:
             self.webserver.engine.delete(hardware_class, row.id)
+            # The history in one bulk DELETE, in this transaction. A cascade through the entity would load every
+            # row of it into the web thread first (a year of a sensor is half a million rows).
+            if "sensors" == kind:
+                SensorHistory.select(lambda h: h.sensor == row).delete(bulk=True)
+            else:
+                RelayHistory.select(lambda h: h.relay == row).delete(bulk=True)
             row.delete()
             orm.commit()
         except Exception:
