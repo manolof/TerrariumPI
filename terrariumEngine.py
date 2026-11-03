@@ -1668,7 +1668,7 @@ class terrariumEngine(object):
         tmp = self.sensor_averages
         averages = []
         if len(tmp) > 0:
-            for avg_type in self.sensor_averages:
+            for avg_type in tmp:
                 motd_data[f"average_{avg_type}"] = tmp[avg_type]["value"]
                 motd_data[f"average_{avg_type}_unit"] = self.units[avg_type]
                 motd_data[f"average_{avg_type}_alarm"] = (
