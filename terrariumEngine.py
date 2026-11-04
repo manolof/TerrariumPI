@@ -229,7 +229,9 @@ class terrariumEngine(object):
 
         self.motd()
 
-        startup_message = f'TerrariumPI {self.version} is up and running at address: http://{socket.getfqdn()}:{self.settings["port"]} in {time.time()-self.starttime:.2f} seconds.'
+        # The address the owner opens from a mail: the Pi on the home network, and the new UI through nginx.
+        ui_url = os.environ.get("TERRARIUM_UI_URL", "http://192.168.1.96:8100")
+        startup_message = f"TerrariumPI {self.version} is up and running at address: {ui_url} in {time.time()-self.starttime:.2f} seconds."
         logger.info(startup_message)
         self._broadcast(startup_message)
 

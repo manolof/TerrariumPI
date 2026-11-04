@@ -300,7 +300,8 @@ class terrariumNotification(terrariumSingleton):
         for service in self.services.values():
             if service is not None and service.enabled:
                 try:
-                    service.send_message("system_broadcast", subject, message, None, [image])
+                    # The image is not attached to mails any more.
+                    service.send_message("system_broadcast", subject, message, None, [])
                 except Exception as ex:
                     logger.exception(f"Error sending broadcast message: {ex}")
 
@@ -510,31 +511,16 @@ class terrariumNotificationServiceEmail(terrariumNotificationService):
             # Configuration is not loaded, or no receivers, ignore sending emails
             return
 
-        html_body = '<html><head><title>{}</title></head><body><img src="cid:{}" alt="Profile image" title="Profile image" align="right" style="max-width:300px;border-radius:25%;">{}</body></html>'
+        # Mails carry no picture: the profile image is not attached or shown.
+        html_body = '<html><head><title>{}</title></head><body>{}</body></html>'
 
         email_message = emails.Message(
             headers={"X-Mailer": "TerrariumPI version {}".format(self.setup["version"])},
-            html=html_body.format(
-                subject, os.path.basename(self.setup["profile_image"]), message.replace("\n", "<br />")
-            ),
+            html=html_body.format(subject, message.replace("\n", "<br />")),
             text=message,
             subject=subject,
             mail_from=("TerrariumPI", self.setup["sender"]),
         )
-
-        profile_image_path = ("public/" if self.setup["profile_image"].startswith("img/") else "") + self.setup[
-            "profile_image"
-        ]
-        try:
-            with open(profile_image_path, "rb") as fp:
-                profile_image = fp.read()
-                email_message.attach(
-                    filename=os.path.basename(self.setup["profile_image"]),
-                    content_disposition="inline",
-                    data=profile_image,
-                )
-        except FileNotFoundError:
-            logger.warning(f"Profile image at location {profile_image_path} does not exists.")
 
         for attachment in attachments:
             try:
