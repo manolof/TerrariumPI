@@ -319,27 +319,42 @@ class terrariumManage(object):
         }
 
     @staticmethod
-    def _night_difference(sensor_id) -> float:
-        """The largest day/night difference of the areas that use the sensor, as a size. 0 when none does."""
+    def _night_difference(sensor_id, area_id=None, setup=None) -> float:
+        """The largest day/night difference of the areas that use the sensor, as a size. 0 when none does.
+        A setup given for area_id replaces that area's stored one, so a change can be checked before it is saved."""
         largest = 0
         for area in Area.select():
-            setup = area.setup if isinstance(area.setup, dict) else {}
-            if sensor_id in terrariumManage._id_list(setup.get("sensors")):
-                difference = _stored_number(setup.get("day_night_difference", 0)) or 0
+            area_setup = setup if setup is not None and area.id == area_id else area.setup
+            area_setup = area_setup if isinstance(area_setup, dict) else {}
+            if sensor_id in terrariumManage._id_list(area_setup.get("sensors")):
+                difference = _stored_number(area_setup.get("day_night_difference", 0)) or 0
                 largest = max(largest, abs(difference))
         return largest
 
     @classmethod
-    def _check_valid_range(cls, sensor, changes: dict) -> None:
+    def _check_valid_range(cls, sensor, changes: dict, difference=None) -> None:
         """limit_min and limit_max are the engine's filter for valid readings: a reading outside them is thrown away,
-        the sensor errors and Heat is held off. They must reach 2 beyond the alarm limits, shifted for the night."""
+        the sensor errors and Heat is held off. They must reach 2 beyond the alarm limits, shifted for the night.
+        difference is the largest day/night difference to allow for; None reads it from the stored areas."""
         alarm_min = changes.get("alarm_min", sensor.alarm_min)
         alarm_max = changes.get("alarm_max", sensor.alarm_max)
         limit_min = changes.get("limit_min", sensor.limit_min)
         limit_max = changes.get("limit_max", sensor.limit_max)
-        margin = cls._night_difference(sensor.id) + 2
+        if difference is None:
+            difference = cls._night_difference(sensor.id)
+        margin = difference + 2
         if not (limit_min <= alarm_min - margin and limit_max >= alarm_max + margin):
             raise ManageError("The valid range must reach at least 2 beyond the alarm limits, at night too.")
+
+    @classmethod
+    def _check_area_ranges(cls, area, setup: dict) -> None:
+        """A new day/night difference moves the night limits of every sensor the area uses, so each of those sensors
+        is checked against the largest difference of its areas, with this area's new setup in place of the stored one."""
+        for sensor_id in cls._id_list(setup.get("sensors")):
+            sensor = Sensor.get(id=sensor_id)
+            if sensor is not None:
+                difference = cls._night_difference(sensor_id, area.id, setup)
+                cls._check_valid_range(sensor, {}, difference)
 
     @orm.db_session()
     def sensor_get(self, sensor):
@@ -514,6 +529,10 @@ class terrariumManage(object):
                 self._light_changes(body, setup)
             else:
                 self._run_changes(area.type, body, setup)
+
+            # Only a new difference moves the night limits; a name or run change leaves every sensor's margin as it was
+            if "day_night_difference" in body:
+                self._check_area_ranges(area, setup)
         except ManageError as ex:
             raise HTTPError(status=400, body=str(ex))
 

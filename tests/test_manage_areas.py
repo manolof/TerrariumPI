@@ -263,6 +263,8 @@ def test_difference_range(home):
     assert status_of(home, "Heat", {"day_night_difference": -10.1}) == 400
     assert status_of(home, "Heat", {"day_night_difference": 10.1}) == 400
     assert status_of(home, "Heat", {"day_night_difference": True}) == 400
+    # Sprinklers' humidity alarm is 90, so a difference of 10 needs a valid range up to 102
+    set_limits(HUMIDITY, 0, 110)
     put(home, "Heat", {"day_night_difference": -10})
     put(home, "Sprinklers", {"day_night_difference": 10})
     put(home, "Heat", {"day_night_difference": -2.5})
@@ -536,3 +538,64 @@ def test_an_area_the_engine_did_not_reload_is_a_500(home):
         with pytest.raises(FakeHTTPError) as err:
             put(home, "Heat", {"run_seconds": 1300})
     assert err.value.body == "The area was saved, but the engine could not reload it."
+
+
+# --- a day/night difference must keep every sensor's valid range 2 beyond its alarm limits, shifted for the night ---
+VALID_RANGE_MESSAGE = "The valid range must reach at least 2 beyond the alarm limits, at night too."
+
+
+def set_limits(sensor, low, high):
+    with orm.db_session():
+        Sensor[sensor].limit_min = low
+        Sensor[sensor].limit_max = high
+
+
+def set_area_sensors(name, sensors):
+    with orm.db_session():
+        area = Area[IDS[name]]
+        setup = json.loads(json.dumps(area.setup))
+        setup["sensors"] = sensors
+        area.setup = setup
+
+
+def refused_with_valid_range_message(home, name, body):
+    with pytest.raises(FakeHTTPError) as err:
+        put(home, name, body)
+    assert err.value.status == 400
+    assert err.value.body == VALID_RANGE_MESSAGE
+
+
+def test_difference_that_leaves_the_valid_range_short_is_refused(home):
+    # Heat: alarm 22 to 28. At -2 the valid range must reach 18 and 32.
+    set_limits(TEMPERATURE, 18, 32)
+    refused_with_valid_range_message(home, "Heat", {"day_night_difference": -3})
+    assert stored("Heat")["day_night_difference"] == -2
+    put(home, "Heat", {"day_night_difference": -1})
+    assert stored("Heat")["day_night_difference"] == -1
+    refused_with_valid_range_message(home, "Heat", {"day_night_difference": -4})
+    assert stored("Heat")["day_night_difference"] == -1
+
+
+def test_difference_is_checked_against_every_sensor_of_the_area(home):
+    set_area_sensors("Heat", [TEMPERATURE, HUMIDITY])
+    set_limits(TEMPERATURE, 0, 100)
+    # Alarm 65 to 90. Sprinklers also uses this sensor with a difference of 5, so the margin is 7 at most.
+    set_limits(HUMIDITY, 58, 97)
+    put(home, "Heat", {"day_night_difference": -3})
+    refused_with_valid_range_message(home, "Heat", {"day_night_difference": -6})
+    assert stored("Heat")["day_night_difference"] == -3
+
+
+def test_largest_difference_of_the_sensors_areas_counts(home):
+    # Sprinklers (difference 5) also uses the temperature sensor, so Heat's -1 gets a margin of 7, not 3
+    set_area_sensors("Sprinklers", [HUMIDITY, TEMPERATURE])
+    set_limits(TEMPERATURE, 17, 33)
+    refused_with_valid_range_message(home, "Heat", {"day_night_difference": -1})
+    assert stored("Heat")["day_night_difference"] == -2
+
+
+def test_name_and_run_changes_do_not_check_the_valid_range(home):
+    set_limits(TEMPERATURE, 25, 30)
+    assert put(home, "Heat", {"name": "Warmth"})["name"] == "Warmth"
+    put(home, "Heat", {"run_seconds": 1200})
+    assert stored("Heat")["low"]["power_on_time"] == 1200
