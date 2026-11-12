@@ -658,6 +658,34 @@ def test_close_of_a_display_never_drawn_or_disabled_writes_nothing():
     assert sum(len(bus.raw) for bus in buses.opened) == writes
 
 
+def test_close_right_after_the_display_was_switched_off_writes_nothing():
+    buses = Buses()
+    panel = panel_for(buses)
+    panel.update(SENSORS, RELAYS, THU)
+    bus = buses.last
+    writes = len(bus.raw)
+
+    # Switched off, and the engine stops before the next round applies it
+    panel.reload(settings(enabled=False))
+    panel.close()
+
+    assert len(bus.raw) == writes and len(buses.opened) == 1
+    assert bus.closed
+    assert bus.screen() == lines(DISPLAY_DEFAULTS["lines"])
+
+
+def test_close_right_after_a_reload_that_stays_on_says_engine_stopped():
+    buses = Buses()
+    panel = panel_for(buses)
+    panel.update(SENSORS, RELAYS, THU)
+
+    panel.reload(settings(enabled=True, backlight="off"))
+    panel.close()
+
+    assert buses.last.screen()[0] == "Engine stopped".ljust(20)
+    assert buses.last.closed
+
+
 def test_a_write_error_at_close_is_logged_and_swallowed(caplog):
     buses = Buses()
     panel = panel_for(buses)

@@ -432,7 +432,13 @@ class DisplayPanel(object):
 
     def close(self) -> None:
         """At engine stop: an enabled display that was drawn says the engine stopped, with its backlight as it was.
-        Never raises: a fault is logged, and the bus is closed whatever happens."""
+        Never raises: a fault is logged, and the bus is closed whatever happens.
+        Settings not applied yet count: a display the owner just switched off gets nothing."""
+        with self._lock:
+            pending, self._pending = self._pending, None
+        if pending is not None:
+            self.settings = pending
+
         try:
             if self.settings["enabled"] and self._drawn_on is not None:
                 if self._lcd is None:
