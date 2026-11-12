@@ -274,7 +274,11 @@ class LcdI2C(object):
     ENABLE = 0x04
     BACKLIGHT = 0x08
     LINE_STARTS = (0x80, 0xC0, 0x94, 0xD4)
-    INIT = (0x33, 0x32, 0x28, 0x0C, 0x06, 0x01)
+    # The reset sync: single high nibbles with the pause after each, then 0x2 for 4-bit mode
+    RESET = ((0x30, 0.005), (0x30, 0.001), (0x30, 0.001))
+    FOUR_BIT = 0x20
+    # 4-bit two line mode, display on with no cursor, cursor moves right, clear
+    INIT = (0x28, 0x0C, 0x06, 0x01)
     CLEAR = 0x01
 
     def __init__(
@@ -299,10 +303,13 @@ class LcdI2C(object):
         """Opens the bus and sets the display up: 4-bit, two line mode, display on, no cursor, cleared."""
         self.close()
         self._smbus = self._factory(self.bus)
+        # The LCD may still be in 8-bit mode, or half way through a byte: only single nibbles reset it for sure
+        for nibble, pause in self.RESET:
+            self._nibble(nibble)
+            self._sleep(pause)
+        self._nibble(self.FOUR_BIT)
         for command in self.INIT:
             self._command(command)
-            if command in (0x33, 0x32):
-                self._sleep(0.005)
         self._sleep(0.002)
 
     def clear(self) -> None:

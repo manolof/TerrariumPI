@@ -386,6 +386,35 @@ def test_lcd_init_sends_the_standard_sequence():
     assert bus.backlight() is True
 
 
+def test_lcd_init_sends_the_reset_sync_as_single_nibbles():
+    # Each nibble the LCD latches and each pause, in the order they happen
+    timeline = []
+
+    class TimedBus(FakeBus):
+        def write_byte(self, address, value):
+            if self._last & E and not value & E:
+                timeline.append(("nibble", (self._last & 0xF0) >> 4, self._last & RS))
+            super().write_byte(address, value)
+
+    lcd = LcdI2C(4, 0x27, 20, 4, smbus_factory=TimedBus, sleep=lambda s: timeline.append(("sleep", s)))
+    lcd.init()
+
+    def command(value):
+        return [("nibble", value >> 4, 0), ("nibble", value & 0x0F, 0)]
+
+    assert timeline == (
+        [("nibble", 0x3, 0), ("sleep", 0.005)]
+        + [("nibble", 0x3, 0), ("sleep", 0.001)]
+        + [("nibble", 0x3, 0), ("sleep", 0.001)]
+        + [("nibble", 0x2, 0)]
+        + command(0x28)
+        + command(0x0C)
+        + command(0x06)
+        + command(0x01)
+        + [("sleep", 0.002)]
+    )
+
+
 def test_lcd_line_addresses_and_backlight_bit():
     buses = Buses()
     lcd = LcdI2C(4, 0x27, 20, 4, smbus_factory=buses, sleep=lambda s: None)
