@@ -150,6 +150,36 @@ def test_display_inputs_come_from_the_database(sensor_db):
     assert relays == [{"name": "Relay - Heat (2)", "value": 100}]
 
 
+def test_display_inputs_with_no_stored_limits(sensor_db):
+    from datetime import datetime
+
+    from terrariumDatabase import Sensor, SensorHistory
+
+    engine = make_engine()
+    engine.settings = {"exclude_ids": []}
+    engine.sensors = {"t1": object(), "h1": object()}
+    engine.relays = {}
+    with orm.db_session():
+        Sensor(id="t1", hardware="test", type="temperature", name="T", address="1", alarm_min=None, alarm_max=28)
+        Sensor(id="h1", hardware="test", type="humidity", name="H", address="2", alarm_min=60, alarm_max=None)
+        SensorHistory(
+            sensor="t1", timestamp=datetime.now(), value=22.4, alarm_min=0, alarm_max=28, limit_min=0, limit_max=50
+        )
+    Sensor.night_shifts["t1"] = -2.0
+    Sensor.night_shifts["h1"] = -2.0
+
+    try:
+        sensors, relays = engine._display_inputs()
+    finally:
+        Sensor.night_shifts.pop("t1", None)
+        Sensor.night_shifts.pop("h1", None)
+
+    assert sorted(sensors, key=lambda s: s["type"]) == [
+        {"type": "humidity", "value": None, "error": True, "alarm_min": 58, "alarm_max": None},
+        {"type": "temperature", "value": 22.4, "error": False, "alarm_min": None, "alarm_max": 26},
+    ]
+
+
 def test_stop_closes_the_display():
     engine = with_display(make_engine())
     engine.display.close.side_effect = RuntimeError("bus")

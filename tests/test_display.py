@@ -279,6 +279,32 @@ def test_out_of_limits_gets_a_mark():
     ]
 
 
+def test_a_missing_limit_means_no_limit_on_that_side():
+    def show(sensors):
+        return [text.rstrip() for text in lines(["temperature", "humidity", "alarms", "empty"], sensors=sensors)[:3]]
+
+    # No limits at all: no mark, whatever the value
+    assert show([sensor("temperature", 40.0, None, None), sensor("humidity", 5.0, None, None)]) == [
+        "Temp 40.0 C",
+        "Humid 5.0 %",
+        "All good",
+    ]
+    # One side missing: the other side still counts
+    assert show([sensor("temperature", 40.0, None, 28), sensor("humidity", 5.0, 60, None)]) == [
+        "Temp 40.0 C !",
+        "Humid 5.0 % !",
+        "Temp high",
+    ]
+    assert show([sensor("temperature", 10.0, None, 28), sensor("humidity", 95.0, 60, None)]) == [
+        "Temp 10.0 C",
+        "Humid 95.0 %",
+        "All good",
+    ]
+    # Two sensors of a type, one with no limit: the one that has it counts
+    two = [sensor("temperature", 29.0, 20, None), sensor("temperature", 29.0, 20, 28), sensor("humidity", 70, 60, 90)]
+    assert show(two) == ["Temp 29.0 C !", "Humid 70.0 %", "Temp high"]
+
+
 def test_alarms_in_order():
     def alarm(sensors):
         return lines(["alarms", "empty", "empty", "empty"], sensors=sensors)[0].rstrip()

@@ -767,8 +767,9 @@ class terrariumEngine(object):
                         "type": sensor.type,
                         "value": value,
                         "error": value is None,
-                        "alarm_min": sensor.active_alarm_min,
-                        "alarm_max": sensor.active_alarm_max,
+                        # A NULL limit is no limit on that side
+                        "alarm_min": None if sensor.alarm_min is None else sensor.active_alarm_min,
+                        "alarm_max": None if sensor.alarm_max is None else sensor.active_alarm_max,
                     }
                 )
 

@@ -141,8 +141,15 @@ def _relay_state(relays, key: str) -> str:
     return "on" if relay["value"] > 0 else "off"
 
 
+def _average(values) -> Optional[float]:
+    # A missing (None) value is left out; None when none is left
+    present = [float(value) for value in values if value is not None]
+    return sum(present) / len(present) if present else None
+
+
 def _reading(sensors, kind: str) -> Optional[dict]:
-    """The average of the good readings of one type, with its averaged active alarm limits. None when there is none."""
+    """The average of the good readings of one type, with its averaged active alarm limits. None when there is none.
+    A limit that is None means no limit on that side: it is left out of the average, and None when no sensor has it."""
     good = [
         sensor
         for sensor in sensors
@@ -151,16 +158,15 @@ def _reading(sensors, kind: str) -> Optional[dict]:
     if not good:
         return None
 
-    count = float(len(good))
-    return {part: sum(float(sensor[part]) for sensor in good) / count for part in ("value", "alarm_min", "alarm_max")}
+    return {part: _average(sensor.get(part) for sensor in good) for part in ("value", "alarm_min", "alarm_max")}
 
 
 def _out(reading: Optional[dict]) -> Optional[str]:
     if reading is None:
         return None
-    if reading["value"] > reading["alarm_max"]:
+    if reading["alarm_max"] is not None and reading["value"] > reading["alarm_max"]:
         return "high"
-    if reading["value"] < reading["alarm_min"]:
+    if reading["alarm_min"] is not None and reading["value"] < reading["alarm_min"]:
         return "low"
     return None
 
