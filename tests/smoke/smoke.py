@@ -121,6 +121,7 @@ def manage_paths(sensor_id, area_id):
         "/api/manage/alerts/",
         "/api/manage/location/",
         "/api/manage/email/",
+        "/api/manage/display/",
         "/api/manage/system/",
         "/api/manage/devices/types/",
     ]

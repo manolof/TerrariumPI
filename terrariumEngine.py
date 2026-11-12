@@ -759,7 +759,9 @@ class terrariumEngine(object):
         sensors, relays = [], []
         with orm.db_session():
             for sensor in Sensor.select(
-                lambda s: s.id in self.sensors.keys() and not s.id in self.settings["exclude_ids"]
+                lambda s: s.id in self.sensors.keys()
+                and s.exclude_avg == False
+                and not s.id in self.settings["exclude_ids"]
             ):
                 value = sensor.value
                 sensors.append(
@@ -788,20 +790,40 @@ class terrariumEngine(object):
 
             sensors, relays = self._display_inputs()
             fault = display.update(sensors, relays, datetime.datetime.now())
-            if fault is not None:
+            if fault is None:
+                # One good round returns to normal logging
+                self._display_fault_seen = None
+                return
+
+            kind = f"display:{type(fault).__name__}"
+            if self._display_fault_loggable(kind):
                 guardLogger.warning(
                     f"The display could not be updated ({type(fault).__name__}: {fault}). It starts again next round."
                 )
-                self._error_mail(
-                    f"display:{type(fault).__name__}",
-                    "The display could not be updated. It starts again next round. See the engine log.",
-                )
-        except Exception as ex:
-            guardLogger.exception("The display update of this round failed.")
             self._error_mail(
-                f"display:{type(ex).__name__}",
+                kind,
+                "The display could not be updated. It starts again next round. See the engine log.",
+            )
+        except Exception as ex:
+            kind = f"display:{type(ex).__name__}"
+            if self._display_fault_loggable(kind):
+                guardLogger.exception("The display update of this round failed.")
+            self._error_mail(
+                kind,
                 "The display update of a round failed. The next round goes on as normal. See the engine log.",
             )
+
+    def _display_fault_loggable(self, kind: str) -> bool:
+        # A fault repeats every round: log it when its type changes, or once per quiet time. Never raises.
+        try:
+            now = self.quiet_errors._clock()
+            seen = getattr(self, "_display_fault_seen", None)
+            if seen is not None and seen[0] == kind and now - seen[1] < self.quiet_errors.quiet_minutes * 60:
+                return False
+            self._display_fault_seen = (kind, now)
+        except Exception:
+            pass
+        return True
 
     def _close_display(self) -> None:
         try:

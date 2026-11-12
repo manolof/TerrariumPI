@@ -67,6 +67,52 @@ def test_a_returned_fault_goes_through_the_error_mail(caplog):
     assert any("display" in r.getMessage().lower() for r in caplog.records if r.name == "terrariumEngineGuard")
 
 
+def guard_records(caplog):
+    return [r for r in caplog.records if r.name == "terrariumEngineGuard"]
+
+
+def test_a_repeating_fault_is_logged_once_per_quiet_period(caplog):
+    engine = with_display(make_engine())
+    engine.display.update.return_value = OSError(121, "Remote I/O error")
+
+    with caplog.at_level(logging.WARNING):
+        run_loop(engine)
+        assert len(guard_records(caplog)) == 1
+
+        # Past the quiet time (60 minutes by default) it is logged again
+        engine.clock.now += 61 * 60
+        engine.wait.reset_mock()
+        run_loop(engine)
+
+    assert len(guard_records(caplog)) == 2
+
+
+def test_a_different_fault_is_logged_at_once(caplog):
+    engine = with_display(make_engine())
+    faults = iter([OSError(121, "x"), OSError(121, "x"), ValueError("y")])
+    engine.display.update.side_effect = lambda *args: next(faults)
+
+    with caplog.at_level(logging.WARNING):
+        run_loop(engine)
+
+    records = guard_records(caplog)
+    assert len(records) == 2
+    assert "OSError" in records[0].getMessage()
+    assert "ValueError" in records[1].getMessage()
+
+
+def test_one_good_round_returns_to_normal_logging(caplog):
+    engine = with_display(make_engine())
+    fault = OSError(121, "x")
+    results = iter([fault, None, fault])
+    engine.display.update.side_effect = lambda *args: next(results)
+
+    with caplog.at_level(logging.WARNING):
+        run_loop(engine)
+
+    assert len(guard_records(caplog)) == 2
+
+
 def test_a_failing_input_read_does_not_stop_the_round():
     engine = with_display(make_engine())
     engine._display_inputs.side_effect = RuntimeError("db")
@@ -178,6 +224,22 @@ def test_display_inputs_with_no_stored_limits(sensor_db):
         {"type": "humidity", "value": None, "error": True, "alarm_min": 58, "alarm_max": None},
         {"type": "temperature", "value": 22.4, "error": False, "alarm_min": None, "alarm_max": 26},
     ]
+
+
+def test_display_inputs_skip_sensors_left_out_of_the_averages(sensor_db):
+    from terrariumDatabase import Sensor
+
+    engine = make_engine()
+    engine.settings = {"exclude_ids": []}
+    engine.sensors = {"t1": object(), "t2": object()}
+    engine.relays = {}
+    with orm.db_session():
+        Sensor(id="t1", hardware="test", type="temperature", name="T", address="1")
+        Sensor(id="t2", hardware="test", type="temperature", name="T2", address="2", exclude_avg=True)
+
+    sensors, relays = engine._display_inputs()
+
+    assert len(sensors) == 1
 
 
 def test_stop_closes_the_display():

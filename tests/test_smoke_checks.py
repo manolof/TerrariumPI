@@ -80,6 +80,6 @@ def test_manage_paths_cover_every_get_route_with_a_seeded_id():
     paths = smoke.manage_paths("S1", "A1")
     assert "/api/manage/sensors/S1/" in paths
     assert "/api/manage/areas/A1/" in paths
-    for fixed in ("alerts", "location", "email", "system", "devices/types"):
+    for fixed in ("alerts", "location", "email", "display", "system", "devices/types"):
         assert f"/api/manage/{fixed}/" in paths
-    assert len(paths) == 7
+    assert len(paths) == 8
