@@ -68,6 +68,7 @@ from hardware.webcam import terrariumWebcam, terrariumWebcamLoadingException
 
 from terrariumNotification import terrariumNotification
 from terrariumAlerts import AlertTracker, QuietErrors, load_alert_settings
+from terrariumDisplay import DisplayPanel, LcdI2C, load_display_settings
 
 
 # https://docs.python.org/3/library/gettext.html#deferred-translations
@@ -164,6 +165,8 @@ class terrariumEngine(object):
 
         # Alert rule for sensor mails and quiet time for error mails. Read once, here.
         self._load_alerts()
+        # The LCD. Nothing is written here: the engine loop draws it, and only when it is enabled.
+        self._load_display()
         try:
             self._ensure_recovered_message()
         except Exception as ex:
@@ -734,6 +737,78 @@ class terrariumEngine(object):
 
         self.alerts = AlertTracker(settings, clock)
         self.quiet_errors = QuietErrors(settings["quiet_minutes"], clock)
+
+    def _load_display(self) -> None:
+        # Start-up goes on whatever the stored settings are: engine.display always exists
+        try:
+            raw = None
+            with orm.db_session():
+                row = Setting.get(id="ludwig_display")
+                if row is not None:
+                    raw = row.value
+
+            settings = load_display_settings(raw)
+        except Exception as ex:
+            logger.warning(f"The display settings could not be loaded ({type(ex).__name__}). The defaults are used.")
+            settings = load_display_settings(None)
+
+        self.display = DisplayPanel(settings, LcdI2C)
+
+    def _display_inputs(self):
+        """The readings with offsets and active alarm limits, and the relay values, as the display reads them."""
+        sensors, relays = [], []
+        with orm.db_session():
+            for sensor in Sensor.select(
+                lambda s: s.id in self.sensors.keys() and not s.id in self.settings["exclude_ids"]
+            ):
+                value = sensor.value
+                sensors.append(
+                    {
+                        "type": sensor.type,
+                        "value": value,
+                        "error": value is None,
+                        "alarm_min": sensor.active_alarm_min,
+                        "alarm_max": sensor.active_alarm_max,
+                    }
+                )
+
+            for relay in Relay.select(lambda r: r.id in self.relays.keys() and not r.id in self.settings["exclude_ids"]):
+                relays.append({"name": relay.name, "value": relay.value})
+
+        return sensors, relays
+
+    def _update_display(self) -> None:
+        # Runs in the engine loop thread only, after the parallel update, so it never writes the bus while a sensor
+        # on it reads. Never raises: a display fault must not cost the round its area update.
+        try:
+            display = getattr(self, "display", None)
+            if display is None or display.idle:
+                return
+
+            sensors, relays = self._display_inputs()
+            fault = display.update(sensors, relays, datetime.datetime.now())
+            if fault is not None:
+                guardLogger.warning(
+                    f"The display could not be updated ({type(fault).__name__}: {fault}). It starts again next round."
+                )
+                self._error_mail(
+                    f"display:{type(fault).__name__}",
+                    "The display could not be updated. It starts again next round. See the engine log.",
+                )
+        except Exception as ex:
+            guardLogger.exception("The display update of this round failed.")
+            self._error_mail(
+                f"display:{type(ex).__name__}",
+                "The display update of a round failed. The next round goes on as normal. See the engine log.",
+            )
+
+    def _close_display(self) -> None:
+        try:
+            display = getattr(self, "display", None)
+            if display is not None:
+                display.close()
+        except Exception as ex:
+            logger.warning(f"The display could not be closed ({type(ex).__name__}).")
 
     # Text of the sensor_recovered message made from the sensor_alarm one
     _RECOVERED_TITLE = "Sensor {name} is back in limits"
@@ -1560,6 +1635,9 @@ class terrariumEngine(object):
                     pool.submit(self._update_webcams)
                     pool.submit(self.__update_checker)
 
+                # The LCD, after the parallel update so it never shares the bus with a sensor read. Never raises.
+                self._update_display()
+
                 # Run encounter/environment updates
                 self._update_enclosures()
 
@@ -2004,6 +2082,9 @@ class terrariumEngine(object):
             self.__engine["logtail"].join()
         except Exception:
             pass
+
+        # The engine thread has ended, so nothing else writes the display bus
+        self._close_display()
 
         for enclosure in self.enclosures:
             self.enclosures[enclosure].stop()

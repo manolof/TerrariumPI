@@ -3,6 +3,7 @@ import terrariumLogging
 
 logger = terrariumLogging.logging.getLogger(__name__)
 
+import copy
 import json
 import math
 import re
@@ -15,6 +16,7 @@ from bottle import request, HTTPError
 
 from terrariumArea import terrariumArea
 from terrariumAlerts import load_alert_settings
+import terrariumDisplay
 from terrariumDatabase import Area, NotificationService, Relay, RelayHistory, Sensor, SensorHistory, Setting
 from terrariumUtils import terrariumUtils
 from hardware.relay import terrariumRelay
@@ -216,6 +218,20 @@ class terrariumManage(object):
             self.alerts_put,
             apply=auth(),
             name="api:manage_alerts_put",
+        )
+        bottle_app.route(
+            "/api/manage/display/",
+            "GET",
+            self.display_get,
+            apply=auth(False),
+            name="api:manage_display_get",
+        )
+        bottle_app.route(
+            "/api/manage/display/",
+            "PUT",
+            self.display_put,
+            apply=auth(),
+            name="api:manage_display_put",
         )
         bottle_app.route(
             "/api/manage/location/",
@@ -657,6 +673,81 @@ class terrariumManage(object):
         engine.quiet_errors.quiet_minutes = settings["quiet_minutes"]
 
         return self._alerts_body(settings)
+
+    # --- display ---
+    DISPLAY_FIELDS = set(terrariumDisplay.DISPLAY_DEFAULTS)
+
+    @staticmethod
+    def _display_stored() -> dict:
+        row = Setting.get(id="ludwig_display")
+        return terrariumDisplay.load_display_settings(None if row is None else row.value)
+
+    @orm.db_session()
+    def display_get(self):
+        return json.loads(json.dumps(self._display_stored()))
+
+    @orm.db_session()
+    def display_put(self):
+        settings = self._display_stored()
+
+        try:
+            body = fields(request.json, self.DISPLAY_FIELDS)
+            if "enabled" in body:
+                if not isinstance(body["enabled"], bool):
+                    raise ManageError("Enabled must be on or off.")
+                settings["enabled"] = body["enabled"]
+
+            if "bus" in body:
+                settings["bus"] = integer("bus", body["bus"], *terrariumDisplay.BUS_RANGE)
+
+            if "address" in body:
+                settings["address"] = integer("address", body["address"], *terrariumDisplay.ADDRESS_RANGE)
+
+            if "size" in body:
+                if not isinstance(body["size"], str) or body["size"] not in terrariumDisplay.SIZES:
+                    raise ManageError("Size must be 20x4 or 16x2.")
+                settings["size"] = body["size"]
+
+            if "lines" in body:
+                if not isinstance(body["lines"], list):
+                    raise ManageError("Lines must be a list.")
+                for number_of, kind in enumerate(body["lines"], start=1):
+                    if not isinstance(kind, str) or kind not in terrariumDisplay.LINE_KINDS:
+                        raise ManageError(
+                            f"Line {number_of} must be one of: {', '.join(terrariumDisplay.LINE_KINDS)}."
+                        )
+                settings["lines"] = list(body["lines"])
+
+            # Checked against the size that will be stored, also when only the size changes
+            rows = terrariumDisplay.SIZES[settings["size"]][1]
+            if len(settings["lines"]) != rows:
+                raise ManageError(f"Lines must have {rows} entries for a {settings['size']} display.")
+
+            if "backlight" in body:
+                if not isinstance(body["backlight"], str) or body["backlight"] not in terrariumDisplay.BACKLIGHT_MODES:
+                    raise ManageError("Backlight must be follow_light, on, off or schedule.")
+                settings["backlight"] = body["backlight"]
+
+            for name in ("on_from", "on_to"):
+                if name in body:
+                    if not terrariumDisplay.valid_time(body[name]):
+                        raise ManageError(f"{_label(name)} must be a time as HH:MM.")
+                    settings[name] = body[name]
+        except ManageError as ex:
+            raise HTTPError(status=400, body=str(ex))
+
+        raw = json.dumps(settings)
+        row = Setting.get(id="ludwig_display")
+        if row is None:
+            Setting(id="ludwig_display", value=raw)
+        else:
+            row.value = raw
+        orm.commit()
+
+        # Only a flag here: the engine loop re-initialises the display on its next round, so only it writes the bus
+        self.webserver.engine.display.reload(copy.deepcopy(settings))
+
+        return json.loads(raw)
 
     # --- location and weather ---
     # The same patterns as weather/openweathermap_org_weather.py and weather/openmeteo_com_weather.py (VALID_SOURCE).
