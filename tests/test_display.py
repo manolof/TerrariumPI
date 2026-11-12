@@ -200,6 +200,16 @@ def test_lines_follow_a_stored_small_size():
     assert result["lines"] == ["temperature", "humidity"]
 
 
+@pytest.mark.parametrize("stored", [{"on_from": "08:00", "on_to": "08:00"}, {"on_from": "21:00"}])
+def test_equal_stored_times_fall_back_to_the_default_times(stored, caplog):
+    with caplog.at_level(logging.WARNING):
+        result = load_display_settings(json.dumps(dict(stored, enabled=True)))
+    assert (result["on_from"], result["on_to"]) == ("07:00", "21:00")
+    assert result["enabled"] is True
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1 and "on_from" in warnings[0].getMessage() and "on_to" in warnings[0].getMessage()
+
+
 def test_unknown_stored_keys_are_left_out():
     assert load_display_settings(json.dumps({"colour": "red"})) == DISPLAY_DEFAULTS
 
@@ -543,10 +553,97 @@ def test_disabled_clears_and_darkens_once_then_nothing():
     assert buses.last.screen() == lines(DISPLAY_DEFAULTS["lines"])
 
 
-def test_close_closes_the_bus():
+def test_close_shows_engine_stopped_and_closes_the_bus():
     buses = Buses()
     panel = panel_for(buses)
     panel.update(SENSORS, RELAYS, THU)
+    bus = buses.last
+    light = bus.backlight()
+
     panel.close()
+
+    assert bus.screen() == ["Engine stopped".ljust(20)] + [" " * 20] * 3
+    assert bus.backlight() is light
+    assert bus.closed
+    writes = len(bus.raw)
+    panel.close()
+    assert len(bus.raw) == writes and len(buses.opened) == 1
+
+
+def test_close_keeps_a_dark_backlight_dark():
+    buses = Buses()
+    panel = panel_for(buses, backlight="off")
+    panel.update(SENSORS, RELAYS, THU)
+    panel.close()
+    assert buses.last.screen()[0] == "Engine stopped".ljust(20)
+    assert all(not value & BL for _, value in buses.last.raw)
+
+
+def test_close_on_a_small_display():
+    buses = Buses()
+    panel = panel_for(buses, size="16x2", lines=["time", "alarms"])
+    panel.update(SENSORS, RELAYS, THU)
+    panel.close()
+    assert buses.last.screen(16, 2) == ["Engine stopped".ljust(16), " " * 16]
+
+
+def test_close_of_a_display_never_drawn_or_disabled_writes_nothing():
+    buses = Buses()
+    DisplayPanel(settings(enabled=True), lcd_factory(buses)).close()
+    DisplayPanel(settings(), lcd_factory(buses)).close()
+    assert buses.opened == []
+
+    # Drawn, then switched off: the one clear, and nothing at close
+    panel = panel_for(buses)
+    panel.update(SENSORS, RELAYS, THU)
+    panel.reload(settings(enabled=False))
+    panel.update(SENSORS, RELAYS, THU)
+    writes = sum(len(bus.raw) for bus in buses.opened)
+    panel.close()
+    assert sum(len(bus.raw) for bus in buses.opened) == writes
+
+
+def test_a_write_error_at_close_is_logged_and_swallowed(caplog):
+    buses = Buses()
+    panel = panel_for(buses)
+    panel.update(SENSORS, RELAYS, THU)
+    buses.last.fail_after = len(buses.last.raw) + 5
+
+    with caplog.at_level(logging.WARNING):
+        panel.close()
+
     assert buses.last.closed
+    assert any("display" in r.getMessage().lower() for r in caplog.records if r.levelno == logging.WARNING)
+
+
+def test_close_after_a_fault_reopens_once_to_show_engine_stopped():
+    buses = Buses()
+    panel = panel_for(buses)
+    panel.update(SENSORS, RELAYS, THU)
+    buses.last.fail_after = 1
+    assert panel.update([sensor("temperature", 25.0, 20, 28), SENSORS[1]], RELAYS, THU) is not None
+
     panel.close()
+
+    assert len(buses.opened) == 2
+    assert buses.last.screen()[0] == "Engine stopped".ljust(20)
+    assert buses.last.closed
+
+
+def test_a_failing_open_at_close_is_swallowed():
+    def broken(bus):
+        raise OSError(2, "No such file or directory")
+
+    buses = Buses()
+    calls = []
+
+    def factory(*geometry):
+        calls.append(geometry)
+        return LcdI2C(*geometry, smbus_factory=buses if len(calls) == 1 else broken, sleep=lambda s: None)
+
+    panel = DisplayPanel(settings(enabled=True), factory)
+    panel.update(SENSORS, RELAYS, THU)
+    buses.last.fail_after = 1
+    panel.update([sensor("temperature", 25.0, 20, 28), SENSORS[1]], RELAYS, THU)
+    panel.close()
+    assert len(calls) == 2

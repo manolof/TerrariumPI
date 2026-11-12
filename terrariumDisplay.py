@@ -104,6 +104,11 @@ def load_display_settings(raw: Optional[str]) -> dict:
         else:
             ignored.append("lines")
 
+    # Equal times would be a schedule with no hours: both go back to their defaults
+    if settings["on_from"] == settings["on_to"]:
+        settings["on_from"], settings["on_to"] = DISPLAY_DEFAULTS["on_from"], DISPLAY_DEFAULTS["on_to"]
+        ignored += [key for key in ("on_from", "on_to") if key not in ignored]
+
     if ignored:
         logger.warning(f"Stored display settings not used, the defaults apply: {', '.join(ignored)}.")
 
@@ -355,6 +360,8 @@ class DisplayPanel(object):
         self._lcd = None
         self._shown = []
         self._backlight = None
+        # The last backlight state written; kept through a fault, for the stop message
+        self._light = None
         # The geometry of the display that was drawn, for the one clear when it is switched off
         self._drawn_on = None
         self._reinit = False
@@ -396,7 +403,7 @@ class DisplayPanel(object):
                 self._open(light)
             elif light != self._backlight:
                 self._lcd.set_backlight(light)
-                self._backlight = light
+                self._backlight = self._light = light
 
             for row, text in enumerate(texts):
                 if text != self._shown[row]:
@@ -408,8 +415,31 @@ class DisplayPanel(object):
 
         return None
 
+    STOPPED = "Engine stopped"
+
     def close(self) -> None:
-        self._close()
+        """At engine stop: an enabled display that was drawn says the engine stopped, with its backlight as it was.
+        Never raises: a fault is logged, and the bus is closed whatever happens."""
+        try:
+            if self.settings["enabled"] and self._drawn_on is not None:
+                if self._lcd is None:
+                    lcd = self._factory(*self._drawn_on)
+                    self._lcd = lcd
+                    lcd.set_backlight(True if self._light is None else self._light)
+                    lcd.init()
+                    self._shown = [None] * self._drawn_on[3]
+
+                width = self._drawn_on[2]
+                for row in range(len(self._shown)):
+                    text = (self.STOPPED if row == 0 else "")[:width].ljust(width)
+                    if text != self._shown[row]:
+                        self._lcd.write_line(row, text)
+                        self._shown[row] = text
+        except Exception as ex:
+            logger.warning(f"The display could not show that the engine stopped ({type(ex).__name__}: {ex}).")
+        finally:
+            self._drawn_on = None
+            self._close()
 
     def _geometry(self) -> tuple:
         width, rows = SIZES[self.settings["size"]]
@@ -425,7 +455,7 @@ class DisplayPanel(object):
         # Set before init, so the init bytes carry the right backlight bit
         lcd.set_backlight(light)
         lcd.init()
-        self._backlight = light
+        self._backlight = self._light = light
         self._shown = [None] * geometry[3]
 
     def _blank(self) -> Optional[Exception]:

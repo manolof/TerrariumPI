@@ -149,6 +149,22 @@ def test_times(manage, name, label):
     assert put(manage, {name: "23:59"})[name] == "23:59"
 
 
+def test_on_and_off_times_must_differ(manage, engine):
+    message = "The on and off times must differ."
+    assert refused(manage, {"on_from": "08:00", "on_to": "08:00"}) == message
+    # Checked against the stored other time
+    assert refused(manage, {"on_from": "21:00"}) == message
+    assert refused(manage, {"on_to": "07:00"}) == message
+    assert refused(manage, {"backlight": "schedule", "on_from": "21:00"}) == message
+    assert stored() is None
+    engine.display.reload.assert_not_called()
+
+    put(manage, {"on_from": "22:00", "on_to": "06:00"})
+    assert refused(manage, {"on_to": "22:00"}) == message
+    # A swap is fine
+    assert put(manage, {"on_from": "06:00", "on_to": "22:00"})["on_to"] == "22:00"
+
+
 def test_unknown_fields_refused(manage):
     assert refused(manage, {"colour": "red"}) == "Unknown field: colour."
     assert refused(manage, [1]) == "The request must be a set of fields."

@@ -733,6 +733,10 @@ class terrariumManage(object):
                     if not terrariumDisplay.valid_time(body[name]):
                         raise ManageError(f"{_label(name)} must be a time as HH:MM.")
                     settings[name] = body[name]
+
+            # Against the stored other time too, so a schedule always has hours
+            if settings["on_from"] == settings["on_to"]:
+                raise ManageError("The on and off times must differ.")
         except ManageError as ex:
             raise HTTPError(status=400, body=str(ex))
 
