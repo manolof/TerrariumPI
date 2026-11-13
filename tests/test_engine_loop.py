@@ -162,3 +162,18 @@ def test_a_failing_error_mail_does_not_end_the_loop():
     run_loop(engine)
 
     assert engine.wait.call_count == ROUNDS
+
+
+def test_a_failing_parallel_update_is_logged_and_mailed(caplog):
+    # Audit 2026-11-12 (core I8): an exception in the sensor update was dropped without a line
+    engine = make_engine()
+    engine._update_sensors.side_effect = RuntimeError("bme280")
+
+    with caplog.at_level(logging.ERROR):
+        run_loop(engine)
+
+    assert engine._update_enclosures.call_count == ROUNDS
+    logged = [r for r in caplog.records if r.name == "terrariumEngineGuard" and "sensors" in r.getMessage()]
+    assert logged and logged[0].exc_info is not None
+    assert len(error_mails(engine)) == 1
+    assert "sensors:RuntimeError" in engine.quiet_errors._last

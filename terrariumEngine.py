@@ -1733,10 +1733,22 @@ class terrariumEngine(object):
 
                 # Run updates in parallel and wait till all done
                 with futures.ThreadPoolExecutor() as pool:
-                    pool.submit(self._update_sensors)
-                    pool.submit(self._update_relays)
-                    pool.submit(self._update_webcams)
-                    pool.submit(self.__update_checker)
+                    jobs = {
+                        pool.submit(self._update_sensors): "sensors",
+                        pool.submit(self._update_relays): "relays",
+                        pool.submit(self._update_webcams): "webcams",
+                        pool.submit(self.__update_checker): "update check",
+                    }
+
+                # An exception in one of them would otherwise be dropped without a line
+                for job, name in jobs.items():
+                    error = job.exception()
+                    if error is not None:
+                        guardLogger.error(f"The {name} update of this round failed.", exc_info=error)
+                        self._error_mail(
+                            f"{name}:{type(error).__name__}",
+                            f"The {name} update of a round failed. See the engine log.",
+                        )
 
                 # The LCD, after the parallel update so it never shares the bus with a sensor read. Never raises.
                 self._update_display()
