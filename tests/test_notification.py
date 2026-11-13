@@ -225,3 +225,65 @@ def test_the_plain_attempt_carries_no_credentials(notification_module, sensor_db
     # (terrariumUtils.decrypt is a stub here, so the stored values are not compared)
     assert all("user" in smtp and "password" in smtp for smtp in attempts[:2])
     assert "user" not in attempts[2] and "password" not in attempts[2]
+
+
+# Message formatting: plain {name} fields from the data only. Nothing is evaluated.
+
+
+def _formatted(notification_module, template, data, title="T"):
+    from pony import orm
+    from terrariumDatabase import NotificationMessage
+
+    with orm.db_session():
+        service = add_service("mail-f", "email", "Mail")
+        NotificationMessage(id="m-f", type="sensor_recovered", title=title, message=template, services=[service])
+
+    notification = notification_module.terrariumNotification(ENGINE)
+    notification.load_services()
+    send = mock.MagicMock()
+    notification.services["mail-f"].send_message = send
+    notification.message("sensor_recovered", dict(data))
+    assert send.call_count == 1
+    return send.call_args.args[1], send.call_args.args[2]
+
+
+def test_braces_in_a_value_are_not_evaluated(notification_module, sensor_db):
+    payload = "{'MARK'+'ER'}"
+
+    _, text = _formatted(notification_module, "Sensor {name} is back", {"name": payload})
+
+    assert text == "Sensor {'MARK'+'ER'} is back"
+    assert "MARKER" not in text
+
+
+def test_a_payload_template_is_not_evaluated(notification_module, sensor_db):
+    # The eval loop used to run every {...} left after formatting
+    _, text = _formatted(notification_module, "{name} {{'MARK'+'ER'}}", {"name": "x"})
+
+    assert "MARKER" not in text
+
+
+def test_attribute_and_index_access_give_nothing(notification_module, sensor_db):
+    title, text = _formatted(
+        notification_module,
+        "{now.__class__} {name[0]} {name.__class__.__init__} {name!r}",
+        {"name": "Warm"},
+        title="{now.__class__.__name__}",
+    )
+
+    assert text == "{now.__class__} {name[0]} {name.__class__.__init__} {name!r}"
+    assert title == "{now.__class__.__name__}"
+    assert "datetime" not in text and "class" not in title.replace("__class__", "")
+
+
+def test_plain_fields_and_a_simple_spec_are_formatted(notification_module, sensor_db):
+    title, text = _formatted(
+        notification_module,
+        "Sensor {name} at {value:.1f}{unit}, ${name} {missing} {value:{name}}",
+        {"name": "Warm", "value": 24.36, "unit": "C"},
+        title="{name} {out_minutes} min",
+    )
+
+    # A nested field is not a plain field: only the inner {name} is filled, once
+    assert text == "Sensor Warm at 24.4C, Warm {missing} {value:Warm}"
+    assert title == "Warm {out_minutes} min"

@@ -22,6 +22,36 @@ from terrariumDatabase import NotificationMessage, NotificationService, Sensor, 
 from terrariumUtils import terrariumUtils, terrariumSingleton, classproperty
 
 
+# A message template field: {{ or }}, or {name} with an optional simple spec such as {value:.1f}.
+# No attribute or index access, no conversion, no nested fields. "${" is the legacy spelling of "{".
+_FIELD = re.compile(r"\{\{|\}\}|\$?\{([A-Za-z_][A-Za-z0-9_]*)(?::([<>^=]?[+\- ]?0?[0-9]{0,3},?(?:\.[0-9]{1,3})?[dfFeEgGs%]?))?\}")
+
+
+def safe_format(template, data) -> str:
+    """Fill plain {name} fields from data, in one pass. Values are never formatted again,
+    nothing is evaluated, and a field that is unknown or not plain is left as it is."""
+    if template is None:
+        return None
+
+    def replace(match):
+        whole = match.group(0)
+        if whole == "{{":
+            return "{"
+        if whole == "}}":
+            return "}"
+
+        name, spec = match.group(1), match.group(2)
+        if name not in data:
+            return whole
+
+        try:
+            return format(data[name], spec or "")
+        except Exception:
+            return whole
+
+    return _FIELD.sub(replace, str(template))
+
+
 # https://docs.python.org/3/library/gettext.html#deferred-translations
 def N_(message):
     return message
@@ -356,24 +386,16 @@ class terrariumNotification(terrariumSingleton):
                 title = None
                 text = None
                 try:
-                    # Legacy text formatting using '$' sign
-                    title = message.title.replace("${", "{").format(**data)
+                    title = safe_format(message.title, data)
                 except Exception as ex:
                     logger.error(f"Wrong message formatting {ex}")
 
                 try:
-                    # Legacy text formatting using '$' sign
-                    text = message.message.replace("${", "{").format(**data)
-                    codelist = re.findall("{.*?}", text)
-
-                    for code in codelist:
-                        result = eval(code[1:-1], {"__builtins__": {}}, {})
-                        text = text.replace(code, result)
-
+                    text = safe_format(message.message, data)
                 except Exception as ex:
                     logger.error(f"Wrong message formatting {ex}")
 
-                if title is None and message is None:
+                if title is None and text is None:
                     continue
 
                 if message.rate_limit > 0 and self.__rate_limit(title, message.rate_limit):
