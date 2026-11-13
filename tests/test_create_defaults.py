@@ -3,10 +3,23 @@
 It deleted every Setting row it does not know, which took ludwig_alerts and ludwig_display at
 every engine start: the owner's alert timing and display settings quietly went back to defaults.
 """
+from types import SimpleNamespace
+from unittest import mock
+
+import pytest
 from pony import orm
 
 import terrariumDatabase
 from terrariumDatabase import Setting
+
+
+@pytest.fixture(autouse=True)
+def plain_crypto():
+    # The encrypted defaults (weather_source, ...) go through these on insert
+    same = lambda value: value
+    utils = SimpleNamespace(encrypt=same, decrypt=same, generate_password=lambda *args, **kwargs: "generated")
+    with mock.patch.object(terrariumDatabase, "terrariumUtils", utils):
+        yield
 
 
 def test_ludwig_settings_survive_create_defaults(sensor_db):
