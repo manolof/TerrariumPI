@@ -202,3 +202,47 @@ def test_the_api_answers_a_refused_hand_on_with_409(sensor_db):
         with pytest.raises(FakeHTTPError) as refused:
             api.relay_action("heat", "on")
     assert refused.value.status == 409 and refused.value.body == "Too warm for Heat: 30.0°."
+
+
+def test_restart_is_refused_while_heat_or_mist_reads_on():
+    engine = engine_with({"heat": (25.0, 28.0)}, mist={"pump"}, heat=FakeRelay(0.0), pump=FakeRelay(100.0))
+    assert engine.restart_refusal() == "Switch Heat and Mist off first."
+    engine.relays["pump"].state = None
+    assert engine.restart_refusal() == "Switch Heat and Mist off first."
+    engine.relays["pump"].state = 0.0
+    assert engine.restart_refusal() is None
+
+
+def restart_api(refusal=None, clock=None):
+    import terrariumAPI
+
+    engine = SimpleNamespace(
+        restart_refusal=mock.MagicMock(return_value=refusal), restart=mock.MagicMock(), settings={"version": "4.16.0"}
+    )
+    api = terrariumAPI.terrariumAPI(SimpleNamespace(engine=engine))
+    if clock is not None:
+        api._clock = clock
+    return terrariumAPI, api, engine
+
+
+def test_the_api_refuses_a_restart_with_409():
+    module, api, engine = restart_api("Switch Heat and Mist off first.")
+    with mock.patch.object(module, "HTTPError", FakeHTTPError):
+        with pytest.raises(FakeHTTPError) as refused:
+            api.server_action("restart")
+    assert refused.value.status == 409 and refused.value.body == "Switch Heat and Mist off first."
+    engine.restart.assert_not_called()
+
+
+def test_a_second_restart_within_a_minute_gets_429():
+    clock = SimpleNamespace(now=1000.0)
+    module, api, engine = restart_api(clock=lambda: clock.now)
+    with mock.patch.object(module, "HTTPError", FakeHTTPError):
+        api.server_action("restart")
+        clock.now += 59
+        with pytest.raises(FakeHTTPError) as refused:
+            api.server_action("restart")
+        assert refused.value.status == 429 and refused.value.body == "The engine was restarted less than a minute ago."
+        clock.now += 2
+        api.server_action("restart")
+    assert engine.restart.call_count == 2

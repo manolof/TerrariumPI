@@ -800,6 +800,18 @@ class terrariumEngine(object):
             return heat_refusal(*readings[relay_id])
         return None
 
+    def restart_refusal(self):
+        """Why a restart must wait, or None. Heat and Mist must read off: a restart during a run would leave the
+        relay on with no run limit. An unknown state counts as on."""
+        readings, mist = self._limit_inputs()
+        for relay_id in set(readings) | set(mist):
+            if relay_id not in self.relays:
+                continue
+            state = self._relay_state(relay_id)
+            if state is None or state > 0:
+                return "Switch Heat and Mist off first."
+        return None
+
     def _relay_state(self, relay_id: str):
         hardware = self.relays.get(relay_id)
         return None if hardware is None else hardware.state

@@ -5,6 +5,7 @@ logger = terrariumLogging.logging.getLogger(__name__)
 
 import json
 import re
+import time
 import types
 from functools import partial
 from datetime import datetime, timedelta
@@ -997,6 +998,18 @@ class terrariumAPI(object):
     # Reboot/start API
     def server_action(self, action):
         if "restart" == action:
+            # A restart during a Heat or Mist run leaves the relay on with no run limit
+            reason = self.webserver.engine.restart_refusal()
+            if reason is not None:
+                raise HTTPError(status=409, body=reason)
+
+            clock = getattr(self, "_clock", time.monotonic)
+            now = clock()
+            last = getattr(self, "_last_restart", None)
+            if last is not None and now - last < 60:
+                raise HTTPError(status=429, body="The engine was restarted less than a minute ago.")
+            self._last_restart = now
+
             self.webserver.engine.restart()
             return {"message": f'TerrariumPI {self.webserver.engine.settings["version"]} is being restarted!'}
 
