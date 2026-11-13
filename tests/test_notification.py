@@ -287,3 +287,81 @@ def test_plain_fields_and_a_simple_spec_are_formatted(notification_module, senso
     # A nested field is not a plain field: only the inner {name} is filled, once
     assert text == "Sensor Warm at 24.4C, Warm {missing} {value:Warm}"
     assert title == "Warm {out_minutes} min"
+
+
+class SlowService:
+    """A mail service whose send waits until the test lets it go."""
+
+    def __init__(self, gate=None):
+        import threading
+
+        self.enabled = True
+        self.sent = []
+        self.gate = gate or threading.Event()
+
+    def send_message(self, *args):
+        self.gate.wait(5)
+        self.sent.append(args)
+        return True
+
+    def stop(self):
+        pass
+
+
+def test_with_the_outbox_a_send_does_not_hold_the_caller(notification_module):
+    # Audit 2026-11-12 (core I11, API D4): the engine loop must not wait on a mail server
+    notification = notification_module.terrariumNotification(ENGINE)
+    service = SlowService()
+    notification.services = {"mail": service}
+    notification.start_outbox()
+    try:
+        notification.broadcast("Start", "Started", None)
+        assert service.sent == []  # the caller is back before the mail went
+        service.gate.set()
+    finally:
+        notification.stop()
+    assert len(service.sent) == 1
+
+
+def test_without_the_outbox_a_send_is_direct(notification_module):
+    notification = notification_module.terrariumNotification(ENGINE)
+    service = SlowService()
+    service.gate.set()
+    notification.services = {"mail": service}
+    notification.broadcast("Start", "Started", None)
+    assert len(service.sent) == 1
+
+
+def test_a_full_outbox_drops_the_mail_with_one_warning(notification_module, caplog):
+    notification = notification_module.terrariumNotification(ENGINE)
+    service = SlowService()
+    notification.services = {"mail": service}
+    notification.start_outbox(size=2)
+    try:
+        with caplog.at_level(logging.WARNING):
+            for _ in range(6):
+                notification.broadcast("Start", "Started", None)
+        warnings = [r for r in caplog.records if "outbox is full" in r.getMessage()]
+        assert len(warnings) == 1
+    finally:
+        service.gate.set()
+        notification.stop()
+
+
+def test_stop_waits_at_most_five_seconds(notification_module):
+    import time
+
+    notification = notification_module.terrariumNotification(ENGINE)
+    service = SlowService()
+    notification.services = {"mail": service}
+    notification.start_outbox(flush_seconds=0.5)
+    notification.broadcast("Start", "Started", None)
+    started = time.monotonic()
+    notification.stop()
+    assert time.monotonic() - started < 2
+    service.gate.set()
+
+
+def test_the_engine_starts_the_outbox():
+    source = (ROOT / "terrariumEngine.py").read_text()
+    assert source.index("self.notification.start_outbox()") > source.index("self.notification = terrariumNotification(self)")

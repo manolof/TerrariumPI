@@ -178,6 +178,8 @@ class terrariumEngine(object):
         self.notification = terrariumNotification(self)
         self.notification.engine = self
         self.notification.load_services()
+        # Mails go from one background worker: the engine loop never waits on a mail server
+        self.notification.start_outbox()
         self._broadcast(startup_message)
 
         # Load Web server, as we need it for websocket communication (even when the web server is not yet started)

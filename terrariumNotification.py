@@ -8,6 +8,8 @@ logger = terrariumLogging.logging.getLogger(None)
 import re
 import datetime
 import copy
+import queue
+import threading
 
 # Email support
 import emails
@@ -241,6 +243,43 @@ class terrariumNotification(terrariumSingleton):
         }
         self.services = {}
         self.engine = engine
+        self._outbox = None
+        self._outbox_worker = None
+        self._outbox_flush = 5.0
+        self._outbox_full_warned = False
+
+    def start_outbox(self, size: int = 50, flush_seconds: float = 5.0) -> None:
+        """Send mails from one background worker, so a slow or unreachable mail server never holds up the
+        engine loop or a log call. Until this is called, sends are direct."""
+        if self._outbox_worker is not None:
+            return
+        self._outbox = queue.Queue(maxsize=size)
+        self._outbox_flush = flush_seconds
+        self._outbox_worker = threading.Thread(target=self._outbox_run, name="mail-outbox", daemon=True)
+        self._outbox_worker.start()
+
+    def _outbox_run(self) -> None:
+        while True:
+            item = self._outbox.get()
+            if item is None:
+                return
+            service, args = item
+            try:
+                service.send_message(*args)
+            except Exception as ex:
+                logger.exception(f"Error sending a mail from the outbox: {ex}")
+
+    def _send(self, service, *args) -> None:
+        if self._outbox is None:
+            service.send_message(*args)
+            return
+        try:
+            self._outbox.put_nowait((service, args))
+            self._outbox_full_warned = False
+        except queue.Full:
+            if not self._outbox_full_warned:
+                logger.warning("The mail outbox is full. Mails are dropped until it empties.")
+                self._outbox_full_warned = True
 
     def __rate_limit(self, title, rate: Optional[float] = None) -> bool:
         # https://en.wikipedia.org/wiki/Token_bucket / https://stackoverflow.com/a/668327
@@ -331,7 +370,7 @@ class terrariumNotification(terrariumSingleton):
             if service is not None and service.enabled:
                 try:
                     # The image is not attached to mails any more.
-                    service.send_message("system_broadcast", subject, message, None, [])
+                    self._send(service, "system_broadcast", subject, message, None, [])
                 except Exception as ex:
                     logger.exception(f"Error sending broadcast message: {ex}")
 
@@ -429,11 +468,21 @@ class terrariumNotification(terrariumSingleton):
 
                     try:
                         message_data = data.copy()
-                        self.services[service.id].send_message(message_type, title, text, message_data)
+                        self._send(self.services[service.id], message_type, title, text, message_data)
                     except Exception as ex:
                         logger.exception(f"Error sending notification message '{title}': {ex}")
 
     def stop(self) -> None:
+        # Let the outbox send what it holds, for at most a few seconds, then stop the services
+        if self._outbox_worker is not None:
+            try:
+                self._outbox.put_nowait(None)
+            except queue.Full:
+                pass
+            self._outbox_worker.join(self._outbox_flush)
+            self._outbox_worker = None
+            self._outbox = None
+
         for service in self.services.values():
             if service is not None:
                 service.stop()
