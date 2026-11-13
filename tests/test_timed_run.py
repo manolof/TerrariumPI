@@ -149,11 +149,23 @@ def test_a_relay_already_on_is_refused(sensor_db, timers):
     assert calls(engine, "mist") == [] and timers == []
 
 
-def test_a_failed_switch_on_starts_no_timer(mist, timers):
+def test_a_failed_switch_on_leaves_no_run(mist, timers):
+    # The timer is armed before the switch, so a switch that raises half way still has its off.
+    # A switch that reports it did not switch on cancels it again.
     mist.relays["mist"].switch.return_value = False
     with pytest.raises(ValueError):
         mist.relay_run("mist", 30)
-    assert timers == [] and mist._terrariumEngine__timed_runs == {}
+    assert mist._terrariumEngine__timed_runs == {}
+    assert all(timer.cancel.called for timer in timers)
+
+
+def test_a_switch_on_that_raises_keeps_its_off_timer(mist, timers):
+    # Audit 2026-11-12 (core I7): the relay may be on although the switch raised
+    mist.relays["mist"].set_state.side_effect = RuntimeError("callback")
+    with pytest.raises(ValueError):
+        mist.relay_run("mist", 30)
+    assert "mist" in runs(mist)
+    assert timers[0].interval == 30 and not timers[0].cancel.called
 
 
 def test_off_during_a_run_cancels_the_timer(mist, timers):
@@ -205,7 +217,8 @@ def test_a_failed_hand_off_keeps_the_timer(mist, timers, caplog):
     assert errors(caplog)
 
 
-def test_a_failed_timer_off_retries_three_times_then_logs(mist, timers, caplog):
+def test_a_failed_timer_off_keeps_trying_until_the_relay_is_off(mist, timers, caplog):
+    # Audit 2026-11-12 (core I6): the run never loses its limit. Three quick tries, then every 30 s.
     mist.relay_run("mist", 30)
     mist.relays["mist"].switch.side_effect = lambda value: value == ON
     with caplog.at_level(logging.ERROR):
@@ -214,11 +227,16 @@ def test_a_failed_timer_off_retries_three_times_then_logs(mist, timers, caplog):
             assert len(timers) == number + 1 and timers[number].interval == 5
             assert "mist" in runs(mist)
             timers[number].function()
-    assert len(timers) == 4
-    assert calls(mist, "mist") == [(ON,)] + [(OFF,)] * 4
+        assert len(timers) == 5 and timers[4].interval == 30
+        assert "mist" in runs(mist)
+        timers[4].function()
+        assert len(timers) == 6 and timers[5].interval == 30
+
+        mist.relays["mist"].switch.side_effect = None  # the switch works again
+        timers[5].function()
     assert runs(mist) == {}
-    assert len(errors(caplog)) == 4
-    assert "after 4 attempts" in errors(caplog)[-1].getMessage()
+    assert mist.relays["mist"].state == OFF
+    assert "still ON" in errors(caplog)[3].getMessage()
 
 
 def test_a_timer_off_that_raises_is_a_failure_and_a_later_success_ends_the_run(mist, timers, caplog):

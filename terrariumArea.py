@@ -18,6 +18,8 @@ from terrariumUtils import terrariumUtils, classproperty
 
 
 WEATHER_MODES = ("weather", "weather_inverse")
+# When a run's time is up and a relay does not switch off, the off is tried again this often
+OFF_RETRY_SECONDS = 30
 
 
 class terrariumAreaException(TypeError):
@@ -711,13 +713,27 @@ class terrariumArea(object):
 
         if not on:
             self.state[part]["last_powered_on"] = int(datetime.datetime.now().timestamp())
-            if fired is not None or self.relays_state(part, False):
-                # The run is over: the timer's own end, or an off that is confirmed. An off that is not confirmed
-                # keeps the timer, so the run still has its limit.
+            # Only the relays this area switches count: a relay in manual mode is the hard limits' to stop
+            switched_off = all(
+                self.enclosure.relays[relay_id].is_off() for relay_id in relays if relay_id in self.enclosure.relays
+            )
+            if switched_off:
+                # The run is over: its relays read off
                 timer = timers.pop(part, None)
                 if timer is not None:
                     timer.cancel()
                 self.state[part]["timer_on"] = False
+            elif fired is not None:
+                # The run's time is up but a relay did not switch off. The run keeps a limit: try again soon.
+                logger.error(
+                    f"Area {self} part {part}: a relay did not switch off at the end of its run. Trying again in {OFF_RETRY_SECONDS} seconds."
+                )
+                retry = threading.Timer(OFF_RETRY_SECONDS, self.relays_toggle, [part, False])
+                retry.daemon = True
+                retry.args = [part, False, retry]
+                timers[part] = retry
+                retry.start()
+            # An off that is not the timer's own and is not confirmed keeps the timer, so the run keeps its limit
 
         self.state[part]["powered"] = on
         self.state["powered"] = self._powered

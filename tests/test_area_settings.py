@@ -381,6 +381,7 @@ class FakeTimer:
 
     def __init__(self, delay, function, args=()):
         self.function, self.args, self.cancelled, self.daemon = function, args, False, False
+        self.interval = delay
         FakeTimer.made.append(self)
 
     def start(self):
@@ -911,3 +912,27 @@ def test_a_sensor_taken_out_of_an_area_loses_its_night_shift(home):
     setup["sensors"] = []
     area.load_setup(setup)
     assert TEMPERATURE not in Sensor.night_shifts
+
+
+def test_a_timer_whose_off_fails_keeps_trying(home):
+    # Audit 2026-11-12 (core I6): the run's time is up but the relay did not switch off. The limit stays.
+    FakeTimer.made = []
+    heat = home.areas["Heat"]
+    with mock.patch.object(terrariumArea.threading, "Timer", FakeTimer):
+        reading(TEMPERATURE, 21.0)
+        heat.update()
+        timer = FakeTimer.made[-1]
+
+        home.relays[HEAT].on = lambda value, **kwargs: True  # the switch does not work
+        timer.fire()
+        assert home.relays[HEAT].is_on()
+        retry = heat._off_timers.get("low")
+        assert retry is not None and retry is not timer
+        assert retry.interval == terrariumArea.OFF_RETRY_SECONDS
+        assert heat.state["low"]["timer_on"] is True
+
+        del home.relays[HEAT].on  # the switch works again
+        retry.fire()
+        assert home.relays[HEAT].is_off()
+        assert "low" not in heat._off_timers
+        assert heat.state["low"]["timer_on"] is False
