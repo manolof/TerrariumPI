@@ -4,6 +4,7 @@ import terrariumLogging
 logger = terrariumLogging.logging.getLogger(__name__)
 
 import json
+import re
 import types
 from functools import partial
 from datetime import datetime, timedelta
@@ -716,6 +717,29 @@ class terrariumAPI(object):
     def removed_write(self, **kwargs):
         raise HTTPError(status=410, body="This feature is removed.")
 
+    # Secrets never leave by a GET: port 8099 is open on the home network and has no login.
+    SECRET_SETTINGS = set(Setting.ENCRYPTED_FIELDS) | {"password"}
+
+    @staticmethod
+    def _without_secret_setting(data):
+        if data.get("id") not in terrariumAPI.SECRET_SETTINGS or not data.get("value"):
+            return data
+        if data["id"] == "weather_source":
+            # The address stays readable; only the key in it is hidden
+            data["value"] = re.sub(r"(appid=)[^&#]*", r"\1***", str(data["value"]), flags=re.I)
+        else:
+            data["value"] = ""
+        return data
+
+    @staticmethod
+    def _without_service_secrets(data):
+        setup = data.get("setup")
+        if isinstance(setup, dict):
+            for field in NotificationService.ENCRYPTED_FIELDS:
+                if field in setup:
+                    setup[field] = ""
+        return data
+
     def changed_in_new_ui(self, **kwargs):
         # The classic write routes skip every check the manage routes make, and some of them could
         # delete files or reach the notification templates. The new UI changes these through
@@ -910,7 +934,7 @@ class terrariumAPI(object):
     @orm.db_session(sql_debug=DEBUG, show_values=DEBUG)
     def notification_service_detail(self, service):
         try:
-            return NotificationService[service].to_dict()
+            return self._without_service_secrets(NotificationService[service].to_dict())
         except orm.core.ObjectNotFound:
             raise HTTPError(status=404, body=f"Notification service with id {service} does not exists.")
         except Exception as ex:
@@ -1389,7 +1413,7 @@ class terrariumAPI(object):
                     for item in part.select(lambda a: a.id in ids):
                         data["value"].append({"id": item.id, "name": item.name})
 
-            return data
+            return self._without_secret_setting(data)
         except orm.core.ObjectNotFound:
             raise HTTPError(status=404, body=f"Setting with id {setting} does not exists.")
         except Exception as ex:
