@@ -95,6 +95,9 @@ def harness():
         terrariumEngine, "terrariumSensor", SensorClass
     ), mock.patch.object(
         terrariumEngine, "terrariumWebcam", WebcamClass
+    ), mock.patch.object(
+        # These tests are about run timers. The hard limits have their own tests (test_engine_limits.py).
+        terrariumEngine.terrariumEngine, "limit_refusal", return_value=None
     ):
         yield
 

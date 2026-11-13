@@ -1012,6 +1012,9 @@ class terrariumAPI(object):
             return self.relay_detail(relay.id)
         except orm.core.ObjectNotFound:
             raise HTTPError(status=404, body=f"Relay with id {relay} does not exists.")
+        except ValueError as ex:
+            # A hard limit refused the On: the sentence says why
+            raise HTTPError(status=409, body=str(ex))
         except Exception as ex:
             raise HTTPError(status=500, body=f"Error getting relay {relay} detail. {ex}")
 

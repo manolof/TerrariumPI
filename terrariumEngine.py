@@ -69,6 +69,7 @@ from hardware.webcam import terrariumWebcam, terrariumWebcamLoadingException
 from terrariumNotification import terrariumNotification
 from terrariumAlerts import AlertTracker, QuietErrors, load_alert_settings
 from terrariumDisplay import DisplayPanel, LcdI2C, load_display_settings
+from terrariumLimits import MIST_MAX_SECONDS, OnTimer, area_reading, heat_refusal, limit_groups
 
 
 # https://docs.python.org/3/library/gettext.html#deferred-translations
@@ -780,6 +781,65 @@ class terrariumEngine(object):
 
         return sensors, relays
 
+    def _limit_inputs(self):
+        """({heat relay id: (temperature, alarm_max)}, {mist relay ids}) from the areas and fresh readings."""
+        with orm.db_session():
+            areas = [{"type": area.type, "setup": area.setup} for area in Area.select()]
+            heat, mist = limit_groups(areas)
+            readings = {}
+            for relay_id, sensor_ids in heat.items():
+                rows = [(sensor.value, sensor.alarm_max) for sensor in Sensor.select(lambda s: s.id in sensor_ids)]
+                readings[relay_id] = area_reading(rows)
+        return readings, mist
+
+    def limit_refusal(self, relay_id: str):
+        """Why a relay may not be switched on now, or None. Only Heat has a refusal: Mist is timed instead."""
+        readings, _ = self._limit_inputs()
+        if relay_id in readings:
+            return heat_refusal(*readings[relay_id])
+        return None
+
+    def _relay_state(self, relay_id: str):
+        hardware = self.relays.get(relay_id)
+        return None if hardware is None else hardware.state
+
+    def _force_off(self, relay_id: str, reason: str) -> None:
+        if self.__relay_off(relay_id):
+            self.relay_run_stop(relay_id)
+            guardLogger.warning(f"Relay {relay_id} was switched off by a safety limit: {reason}")
+        else:
+            guardLogger.error(f"Relay {relay_id} did not switch off for a safety limit: {reason} It is tried again next round.")
+        self._error_mail(f"limit:{relay_id}", f"A relay was switched off by a safety limit: {reason}")
+
+    def _enforce_limits(self) -> None:
+        # Runs in the engine loop after the areas. Holds for manual relays too. Never raises.
+        try:
+            readings, mist = self._limit_inputs()
+
+            for relay_id, (temperature, alarm_max) in readings.items():
+                reason = heat_refusal(temperature, alarm_max)
+                if reason is None or relay_id not in self.relays:
+                    continue
+                state = self._relay_state(relay_id)
+                # An unknown state gets an Off too: Off is always safe
+                if state is None or state > 0:
+                    self._force_off(relay_id, reason)
+
+            watch = self.__dict__.setdefault("_mist_watch", OnTimer())
+            for relay_id in mist:
+                if relay_id not in self.relays:
+                    continue
+                state = self._relay_state(relay_id)
+                if watch.over_limit(relay_id, state is None or state > 0):
+                    self._force_off(relay_id, f"Mist was on for {MIST_MAX_SECONDS // 60} minutes without a break.")
+                    watch.reset(relay_id)
+        except Exception as ex:
+            guardLogger.exception("The safety limit check of this round failed.")
+            self._error_mail(
+                f"limits:{type(ex).__name__}",
+                "The safety limit check of a round failed. See the engine log.",
+            )
+
     def _update_display(self) -> None:
         # Runs in the engine loop thread only, after the parallel update, so it never writes the bus while a sensor
         # on it reads. Never raises: a display fault must not cost the round its area update.
@@ -1284,6 +1344,10 @@ class terrariumEngine(object):
         if hardware.is_dimmer:
             raise ValueError(f"Relay {relay_id} is a dimmer.")
 
+        reason = self.limit_refusal(relay_id)
+        if reason is not None:
+            raise ValueError(reason)
+
         with orm.db_session():
             value = Relay[relay_id].value
 
@@ -1401,6 +1465,10 @@ class terrariumEngine(object):
             elif relay.id in self.__timed_runs:
                 relayLogger.error(f"Relay {relay.id} did not switch off by hand, its timed run is kept.")
         else:
+            # A hard limit refuses an On. Off is never refused.
+            reason = self.limit_refusal(relay.id)
+            if reason is not None:
+                raise ValueError(reason)
             # Any other hand action ends a timed run first, so the timer can not switch off what is then on by hand
             self.relay_run_stop(relay.id)
             # Toggle the switch, will return ok = true when succeeded
@@ -1663,6 +1731,9 @@ class terrariumEngine(object):
 
                 # Run encounter/environment updates
                 self._update_enclosures()
+
+                # The hard limits have the last word in a round, after the areas. Never raises.
+                self._enforce_limits()
 
                 self.motd()
 
