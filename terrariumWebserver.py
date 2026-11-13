@@ -39,6 +39,7 @@ from queue import Queue, Empty
 from terrariumUtils import terrariumUtils
 from terrariumAPI import terrariumAPI
 from terrariumPaths import static_target
+from terrariumRequestGuard import refusal
 
 
 class terrariumWebserver(object):
@@ -291,6 +292,13 @@ class terrariumWebserver(object):
             raise HTTPError(status=500, body=f"Error uploading file. {ex}")
 
     def __routes(self) -> None:
+        # Before any route: refuse writes sent from another site, and bodies over 64 KB.
+        @self.bottle.hook("before_request")
+        def refuse_cross_site_and_large():
+            refused = refusal(request.method, request.headers, request.content_length)
+            if refused is not None:
+                raise HTTPError(status=refused[0], body=refused[1])
+
         # Add a 404 page...
         @self.bottle.error(400)
         @self.bottle.error(404)
