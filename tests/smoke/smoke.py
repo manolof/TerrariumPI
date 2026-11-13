@@ -331,6 +331,8 @@ def main():
                 # (In run.sh, ENABLE_CAMERA, ENABLE_SERIAL and ENABLE_CO2_SENSORS all read ENABLE_1_WIRE.)
                 "-e", "ENABLE_I2C=false",
                 "-e", "ENABLE_1_WIRE=false",
+                # No GPIO under QEMU, so pigpiod never answers: skip driving Heat and Pump low (ludwig-pins.sh)
+                "-e", "LUDWIG_OFF_PINS=",
                 "-v", f"{Path(__file__).resolve().parent}:/smoke:ro",
                 args.image, "/opt/venv/bin/python", "/smoke/launch.py",
             ]

@@ -160,6 +160,9 @@ if [ $? -eq 1 ]; then
   pigpiod -l || true
 fi
 
+# Heat and Pump low before the engine starts. Without pigpiod the engine has no pin control: do not start it.
+bash "$(dirname "$0")/ludwig-pins.sh" || exit 1
+
 # Remove the restart file from last unhealty status
 if [ -f .restart ]; then
   rm .restart
