@@ -38,6 +38,7 @@ from queue import Queue, Empty
 
 from terrariumUtils import terrariumUtils
 from terrariumAPI import terrariumAPI
+from terrariumPaths import static_target
 
 
 class terrariumWebserver(object):
@@ -248,11 +249,12 @@ class terrariumWebserver(object):
         return self._static_file(filename, f"public/{root}")
 
     def _static_file(self, filename, root: str = ""):
-        # Backwards compatibility for '/static/' folder
-        if root == "static":
-            filename = filename.split("/")
-            root = f"public/{filename[0]}"
-            filename = "/".join(filename[1:])
+        # '/static/<folder>/...' maps to public/<folder>/. A request that resolves outside its root is
+        # refused, so '..' can never reach the database, the key file or the logs.
+        target = static_target(filename, root)
+        if target is None:
+            return HTTPError(status=404, body="File does not exist.")
+        root, filename = target
 
         # Load the static file
         if request.headers.get("Accept-Encoding") and "gzip" in request.headers.get("Accept-Encoding"):
@@ -339,9 +341,10 @@ class terrariumWebserver(object):
             "/<root:re:(css|img|js|webfonts)>/<filename:path>", method="GET", callback=self._static_file_gui
         )
 
-        # Other static files
+        # Other static files. The log folder is not served: old rotated logs can hold the weather key.
+        # The log is read through /api/logfile/download/ and the websocket.
         self.bottle.route(
-            "/<root:re:(static|webcam|media|log)>/<filename:path>",
+            "/<root:re:(static|webcam|media)>/<filename:path>",
             method="GET",
             callback=self._static_file,
             apply=self.authenticate(),
