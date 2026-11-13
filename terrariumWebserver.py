@@ -352,7 +352,8 @@ class terrariumWebserver(object):
         self.bottle.route(
             "/<root:re:(media)>/upload/",
             method="POST",
-            callback=self.__file_upload,
+            # Uploads had no size limit and could fill the SD card. Nothing in the new UI uploads.
+            callback=self.api.changed_in_new_ui,
             apply=self.authenticate(),
             name="file_upload",
         )

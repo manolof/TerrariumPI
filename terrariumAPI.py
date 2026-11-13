@@ -85,13 +85,13 @@ class terrariumAPI(object):
         )
 
         bottle_app.route(
-            "/api/areas/<area:path>/", "PUT", self.area_update, apply=self.authentication(), name="api:area_update"
+            "/api/areas/<area:path>/", "PUT", self.changed_in_new_ui, apply=self.authentication(), name="api:area_update"
         )
         bottle_app.route(
-            "/api/areas/<area:path>/", "DELETE", self.area_delete, apply=self.authentication(), name="api:area_delete"
+            "/api/areas/<area:path>/", "DELETE", self.changed_in_new_ui, apply=self.authentication(), name="api:area_delete"
         )
         bottle_app.route("/api/areas/", "GET", self.area_list, apply=self.authentication(False), name="api:area_list")
-        bottle_app.route("/api/areas/", "POST", self.area_add, apply=self.authentication(), name="api:area_add")
+        bottle_app.route("/api/areas/", "POST", self.changed_in_new_ui, apply=self.authentication(), name="api:area_add")
 
         # Removed features API (audio, buttons, calendar, displays, playlists)
         # The classic pages still load: reads answer empty, writes answer 410 Gone.
@@ -148,14 +148,14 @@ class terrariumAPI(object):
         bottle_app.route(
             "/api/enclosures/<enclosure:path>/",
             "PUT",
-            self.enclosure_update,
+            self.changed_in_new_ui,
             apply=self.authentication(),
             name="api:enclosure_update",
         )
         bottle_app.route(
             "/api/enclosures/<enclosure:path>/",
             "DELETE",
-            self.enclosure_delete,
+            self.changed_in_new_ui,
             apply=self.authentication(),
             name="api:enclosure_delete",
         )
@@ -163,7 +163,7 @@ class terrariumAPI(object):
             "/api/enclosures/", "GET", self.enclosure_list, apply=self.authentication(False), name="api:enclosure_list"
         )
         bottle_app.route(
-            "/api/enclosures/", "POST", self.enclosure_add, apply=self.authentication(), name="api:enclosure_add"
+            "/api/enclosures/", "POST", self.changed_in_new_ui, apply=self.authentication(), name="api:enclosure_add"
         )
 
         # Logfile API
@@ -193,14 +193,14 @@ class terrariumAPI(object):
         bottle_app.route(
             "/api/notification/messages/<message:path>/",
             "PUT",
-            self.notification_message_update,
+            self.changed_in_new_ui,
             apply=self.authentication(),
             name="api:notification_message_update",
         )
         bottle_app.route(
             "/api/notification/messages/<message:path>/",
             "DELETE",
-            self.notification_message_delete,
+            self.changed_in_new_ui,
             apply=self.authentication(),
             name="api:notification_message_delete",
         )
@@ -214,7 +214,7 @@ class terrariumAPI(object):
         bottle_app.route(
             "/api/notification/messages/",
             "POST",
-            self.notification_message_add,
+            self.changed_in_new_ui,
             apply=self.authentication(),
             name="api:notification_message_add",
         )
@@ -235,14 +235,14 @@ class terrariumAPI(object):
         bottle_app.route(
             "/api/notification/services/<service:path>/",
             "PUT",
-            self.notification_service_update,
+            self.changed_in_new_ui,
             apply=self.authentication(),
             name="api:notification_service_update",
         )
         bottle_app.route(
             "/api/notification/services/<service:path>/",
             "DELETE",
-            self.notification_service_delete,
+            self.changed_in_new_ui,
             apply=self.authentication(),
             name="api:notification_service_delete",
         )
@@ -256,7 +256,7 @@ class terrariumAPI(object):
         bottle_app.route(
             "/api/notification/services/",
             "POST",
-            self.notification_service_add,
+            self.changed_in_new_ui,
             apply=self.authentication(),
             name="api:notification_service_add",
         )
@@ -326,7 +326,7 @@ class terrariumAPI(object):
         bottle_app.route(
             "/api/relays/<relay:path>/replaced/",
             "POST",
-            self.relay_replace_hardware,
+            self.changed_in_new_ui,
             apply=self.authentication(),
             name="api:relay_replace_hardware",
         )
@@ -336,7 +336,7 @@ class terrariumAPI(object):
         )
 
         bottle_app.route(
-            "/api/relays/scan/", "POST", self.relay_scan, apply=self.authentication(), name="api:relay_scan"
+            "/api/relays/scan/", "POST", self.changed_in_new_ui, apply=self.authentication(), name="api:relay_scan"
         )
 
         bottle_app.route(
@@ -347,19 +347,19 @@ class terrariumAPI(object):
             name="api:relay_detail",
         )
         bottle_app.route(
-            "/api/relays/<relay:path>/", "PUT", self.relay_update, apply=self.authentication(), name="api:relay_update"
+            "/api/relays/<relay:path>/", "PUT", self.changed_in_new_ui, apply=self.authentication(), name="api:relay_update"
         )
         bottle_app.route(
             "/api/relays/<relay:path>/",
             "DELETE",
-            self.relay_delete,
+            self.changed_in_new_ui,
             apply=self.authentication(),
             name="api:relay_delete",
         )
         bottle_app.route(
             "/api/relays/", "GET", self.relay_list, apply=self.authentication(False), name="api:relay_list"
         )
-        bottle_app.route("/api/relays/", "POST", self.relay_add, apply=self.authentication(), name="api:relay_add")
+        bottle_app.route("/api/relays/", "POST", self.changed_in_new_ui, apply=self.authentication(), name="api:relay_add")
 
         # Sensors API
         all_sensor_types = "|".join(terrariumSensor.sensor_types)
@@ -434,7 +434,7 @@ class terrariumAPI(object):
             name="api:sensor_hardware",
         )
         bottle_app.route(
-            "/api/sensors/scan/", "POST", self.sensor_scan, apply=self.authentication(), name="api:sensor_scan"
+            "/api/sensors/scan/", "POST", self.changed_in_new_ui, apply=self.authentication(), name="api:sensor_scan"
         )
         bottle_app.route(
             "/api/sensors/<sensor:path>/",
@@ -446,21 +446,21 @@ class terrariumAPI(object):
         bottle_app.route(
             "/api/sensors/<sensor:path>/",
             "PUT",
-            self.sensor_update,
+            self.changed_in_new_ui,
             apply=self.authentication(),
             name="api:sensor_update",
         )
         bottle_app.route(
             "/api/sensors/<sensor:path>/",
             "DELETE",
-            self.sensor_delete,
+            self.changed_in_new_ui,
             apply=self.authentication(),
             name="api:sensor_delete",
         )
         bottle_app.route(
             "/api/sensors/", "GET", self.sensor_list, apply=self.authentication(False), name="api:sensor_list"
         )
-        bottle_app.route("/api/sensors/", "POST", self.sensor_add, apply=self.authentication(), name="api:sensor_add")
+        bottle_app.route("/api/sensors/", "POST", self.changed_in_new_ui, apply=self.authentication(), name="api:sensor_add")
 
         # Settings API
         bottle_app.route(
@@ -473,14 +473,14 @@ class terrariumAPI(object):
         bottle_app.route(
             "/api/settings/<setting:path>/",
             "PUT",
-            self.setting_update,
+            self.changed_in_new_ui,
             apply=self.authentication(),
             name="api:setting_update",
         )
         bottle_app.route(
             "/api/settings/<setting:path>/",
             "DELETE",
-            self.setting_delete,
+            self.changed_in_new_ui,
             apply=self.authentication(),
             name="api:setting_delete",
         )
@@ -488,7 +488,7 @@ class terrariumAPI(object):
         bottle_app.route(
             "/api/settings/",
             "PUT",
-            self.setting_update_multi,
+            self.changed_in_new_ui,
             apply=self.authentication(),
             name="api:setting_update_multi",
         )
@@ -496,7 +496,7 @@ class terrariumAPI(object):
             "/api/settings/", "GET", self.setting_list, apply=self.authentication(), name="api:setting_list"
         )
         bottle_app.route(
-            "/api/settings/", "POST", self.setting_add, apply=self.authentication(), name="api:setting_add"
+            "/api/settings/", "POST", self.changed_in_new_ui, apply=self.authentication(), name="api:setting_add"
         )
 
         # Status API
@@ -547,21 +547,21 @@ class terrariumAPI(object):
         bottle_app.route(
             "/api/webcams/<webcam:path>/",
             "PUT",
-            self.webcam_update,
+            self.changed_in_new_ui,
             apply=self.authentication(),
             name="api:webcam_update",
         )
         bottle_app.route(
             "/api/webcams/<webcam:path>/",
             "DELETE",
-            self.webcam_delete,
+            self.changed_in_new_ui,
             apply=self.authentication(),
             name="api:webcam_delete",
         )
         bottle_app.route(
             "/api/webcams/", "GET", self.webcam_list, apply=self.authentication(False), name="api:webcam_list"
         )
-        bottle_app.route("/api/webcams/", "POST", self.webcam_add, apply=self.authentication(), name="api:webcam_add")
+        bottle_app.route("/api/webcams/", "POST", self.changed_in_new_ui, apply=self.authentication(), name="api:webcam_add")
 
         # API DOC
         bottle_app.route(
@@ -715,6 +715,12 @@ class terrariumAPI(object):
 
     def removed_write(self, **kwargs):
         raise HTTPError(status=410, body="This feature is removed.")
+
+    def changed_in_new_ui(self, **kwargs):
+        # The classic write routes skip every check the manage routes make, and some of them could
+        # delete files or reach the notification templates. The new UI changes these through
+        # /api/manage/. Only the relay commands and the restart stay open here.
+        raise HTTPError(status=410, body="This is changed in the new UI.")
 
     # Enclosure
     @orm.db_session(sql_debug=DEBUG, show_values=DEBUG)
