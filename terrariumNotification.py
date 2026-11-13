@@ -255,12 +255,16 @@ class terrariumNotification(terrariumSingleton):
             return
         self._outbox = queue.Queue(maxsize=size)
         self._outbox_flush = flush_seconds
-        self._outbox_worker = threading.Thread(target=self._outbox_run, name="mail-outbox", daemon=True)
+        # The worker keeps its own queue: stop() may give up waiting and drop the reference while a send runs
+        self._outbox_worker = threading.Thread(
+            target=self._outbox_run, args=(self._outbox,), name="mail-outbox", daemon=True
+        )
         self._outbox_worker.start()
 
-    def _outbox_run(self) -> None:
+    @staticmethod
+    def _outbox_run(outbox) -> None:
         while True:
-            item = self._outbox.get()
+            item = outbox.get()
             if item is None:
                 return
             service, args = item
