@@ -95,9 +95,10 @@ def create_defaults(version) -> None:
                 Setting["version"].value = f"{version}"
                 orm.commit()
 
-    # Clear old obsolete settings
+    # Clear old obsolete settings. This fork's own rows (ludwig_*) are kept: they hold the owner's
+    # alert and display settings, which went back to defaults at every start before.
     settings = [setting["id"] for setting in setting_defaults]
-    Setting.select(lambda p: p.id not in settings).delete(bulk=True)
+    Setting.select(lambda p: p.id not in settings and not p.id.startswith("ludwig_")).delete(bulk=True)
 
 
 def load_advanced_settings():
