@@ -43,6 +43,7 @@ from terrariumDatabase import (
     db,
     Setting,
     Sensor,
+    SensorHistory,
     Relay,
     Webcam,
     Enclosure,
@@ -186,6 +187,20 @@ class terrariumEngine(object):
         self.notification.load_services()
         # Mails go from one background worker: the engine loop never waits on a mail server
         self.notification.start_outbox()
+
+        # The Pi has no clock battery. Stored readings in the future mean the clock is behind: those readings
+        # are not taken as current, and the owner hears of it.
+        try:
+            ahead = self._history_ahead_of_clock()
+            if ahead is not None:
+                guardLogger.error(f"The clock is behind the stored history (newest reading {ahead}).")
+                self._error_mail(
+                    "clock:behind",
+                    f"The Pi's clock is behind its stored history (newest reading {ahead}). "
+                    "Day and night and the light times are off until the time is right.",
+                )
+        except Exception:
+            guardLogger.exception("The clock check at start failed.")
 
         # A damaged database after a brown-out: the engine carries on, but the owner hears of it
         if terrariumDatabase.INTEGRITY_PROBLEM is not None:
@@ -797,6 +812,13 @@ class terrariumEngine(object):
                 relays.append({"name": relay.name, "value": relay.value})
 
         return sensors, relays
+
+    def _history_ahead_of_clock(self):
+        """The newest stored reading when it lies in the future (the clock is behind), else None."""
+        with orm.db_session():
+            newest = orm.max(h.timestamp for h in SensorHistory)
+        limit = datetime.datetime.now() + datetime.timedelta(seconds=terrariumDatabase.FUTURE_SLACK)
+        return newest if newest is not None and newest > limit else None
 
     def _prune_history(self, now=None) -> None:
         # The history tables only grew (about a million rows a year) and the month graph already held up the

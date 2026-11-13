@@ -40,6 +40,9 @@ def sqlite_speedups(db, connection) -> None:
 # What PRAGMA quick_check found at start, or None when the database is sound. The engine mails it.
 INTEGRITY_PROBLEM = None
 
+# How far ahead of the clock a history row may be and still count as the current value, in seconds
+FUTURE_SLACK = 60
+
 
 def integrity_problem(path):
     """The first problem PRAGMA quick_check finds in the database file, or None when it is sound or absent."""
@@ -426,8 +429,11 @@ class Relay(db.Entity):
 
     @property
     def value(self):
+        # A row stamped well in the future is from before a clock jump (no clock battery): it is not current
+        oldest = datetime.now() - timedelta(seconds=Relay.__MAX_VALUE_AGE)
+        newest = datetime.now() + timedelta(seconds=FUTURE_SLACK)
         value = (
-            self.history.filter(lambda h: h.timestamp >= datetime.now() - timedelta(seconds=Relay.__MAX_VALUE_AGE))
+            self.history.filter(lambda h: h.timestamp >= oldest and h.timestamp <= newest)
             .order_by(orm.desc(RelayHistory.timestamp))
             .first()
         )
@@ -572,8 +578,11 @@ class Sensor(db.Entity):
 
     @property
     def value(self):
+        # A row stamped well in the future is from before a clock jump (no clock battery): it is not current
+        oldest = datetime.now() - timedelta(seconds=Sensor.__MAX_VALUE_AGE)
+        newest = datetime.now() + timedelta(seconds=FUTURE_SLACK)
         value = (
-            self.history.filter(lambda h: h.timestamp >= datetime.now() - timedelta(seconds=Sensor.__MAX_VALUE_AGE))
+            self.history.filter(lambda h: h.timestamp >= oldest and h.timestamp <= newest)
             .order_by(orm.desc(SensorHistory.timestamp))
             .first()
         )
