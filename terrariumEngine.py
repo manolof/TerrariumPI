@@ -37,6 +37,7 @@ from pyfancy.pyfancy import pyfancy
 from func_timeout import func_timeout, FunctionTimedOut
 
 from pony import orm
+import terrariumDatabase
 from terrariumDatabase import (
     init as init_db,
     db,
@@ -180,6 +181,14 @@ class terrariumEngine(object):
         self.notification.load_services()
         # Mails go from one background worker: the engine loop never waits on a mail server
         self.notification.start_outbox()
+
+        # A damaged database after a brown-out: the engine carries on, but the owner hears of it
+        if terrariumDatabase.INTEGRITY_PROBLEM is not None:
+            self._error_mail(
+                "db:quick_check",
+                f"The database failed its integrity check at start ({terrariumDatabase.INTEGRITY_PROBLEM}). "
+                "The engine runs on. Make a copy of data/ before anything else.",
+            )
         self._broadcast(startup_message)
 
         # Load Web server, as we need it for websocket communication (even when the web server is not yet started)

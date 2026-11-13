@@ -8,6 +8,7 @@ from pathlib import Path
 from terrariumUtils import terrariumUtils
 
 import copy
+import logging
 import re
 import sqlite3
 import time
@@ -24,7 +25,9 @@ def sqlite_speedups(db, connection) -> None:
         "auto_vacuum": "NONE",
         "cache_size": -10000,
         "journal_mode": "WAL",
-        "synchronous": "OFF",
+        # NORMAL with WAL: a power cut may lose the last writes but cannot corrupt the file. OFF could, and
+        # this Pi browns out. data/.database-env can still override it.
+        "synchronous": "NORMAL",
         "temp_store": "MEMORY",
     }
 
@@ -34,7 +37,33 @@ def sqlite_speedups(db, connection) -> None:
         cursor.execute(f"PRAGMA {key}  = {value}")
 
 
+# What PRAGMA quick_check found at start, or None when the database is sound. The engine mails it.
+INTEGRITY_PROBLEM = None
+
+
+def integrity_problem(path):
+    """The first problem PRAGMA quick_check finds in the database file, or None when it is sound or absent."""
+    if not Path(path).exists():
+        return None
+    try:
+        connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        try:
+            result = connection.execute("PRAGMA quick_check(1)").fetchone()
+        finally:
+            connection.close()
+    except sqlite3.DatabaseError as ex:
+        return f"{type(ex).__name__}: {ex}"
+    value = result[0] if result else "no answer"
+    return None if value == "ok" else str(value)
+
+
 def init(version) -> None:
+    global INTEGRITY_PROBLEM
+    # Before anything writes: a brown-out can leave the file damaged
+    INTEGRITY_PROBLEM = integrity_problem(DATABASE)
+    if INTEGRITY_PROBLEM is not None:
+        logging.getLogger(__name__).error(f"The database failed its integrity check: {INTEGRITY_PROBLEM}")
+
     backend = get_backend(f"sqlite:///{DATABASE}")
     migrations = read_migrations("migrations")
 
