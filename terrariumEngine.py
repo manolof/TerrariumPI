@@ -89,6 +89,11 @@ class terrariumEngine(object):
     __RUN_OFF_WAIT = 5
     __RUN_OFF_SLOW_WAIT = 30
 
+    # History pruning: once a day after 03:00, rows older than this many days, in batches, within a time budget
+    __PRUNE_DAYS = 400
+    __PRUNE_BATCH = 5000
+    __PRUNE_SECONDS = 20
+
     def __init__(self, version) -> None:
         self.starttime = time.time()
         # Default system units
@@ -792,6 +797,42 @@ class terrariumEngine(object):
                 relays.append({"name": relay.name, "value": relay.value})
 
         return sensors, relays
+
+    def _prune_history(self, now=None) -> None:
+        # The history tables only grew (about a million rows a year) and the month graph already held up the
+        # engine. Once a day after 03:00, rows older than __PRUNE_DAYS go, a batch at a time, within a time
+        # budget, so the round is held up for seconds at most. What is left goes the next night. Never raises.
+        try:
+            now = now or datetime.datetime.now()
+            if now.hour < 3 or getattr(self, "_pruned_on", None) == now.date():
+                return
+            self._pruned_on = now.date()
+
+            # Pony stores datetimes as text with six fraction digits, so text order is time order
+            cutoff = (now - datetime.timedelta(days=terrariumEngine.__PRUNE_DAYS)).strftime("%Y-%m-%d %H:%M:%S.%f")
+            batch = int(terrariumEngine.__PRUNE_BATCH)
+            deadline = time.monotonic() + terrariumEngine.__PRUNE_SECONDS
+            removed = 0
+            for table in ("SensorHistory", "RelayHistory"):
+                while True:
+                    with orm.db_session():
+                        cursor = db.execute(
+                            f'DELETE FROM "{table}" WHERE rowid IN '
+                            f'(SELECT rowid FROM "{table}" WHERE "timestamp" < $cutoff LIMIT {batch})'
+                        )
+                        gone = cursor.rowcount
+                    removed += gone
+                    if gone < batch or time.monotonic() >= deadline:
+                        break
+                    sleep(0)  # let the web requests in between batches
+                if time.monotonic() >= deadline:
+                    break
+
+            if removed:
+                logger.info(f"Pruned {removed} history rows older than {terrariumEngine.__PRUNE_DAYS} days.")
+        except Exception as ex:
+            guardLogger.exception("Pruning the history failed. It is tried again tomorrow.")
+            self._error_mail(f"prune:{type(ex).__name__}", "Pruning the old history failed. See the engine log.")
 
     def _limit_inputs(self):
         """({heat relay id: (temperature, alarm_max)}, {mist relay ids}) from the areas and fresh readings."""
@@ -1781,6 +1822,9 @@ class terrariumEngine(object):
 
                 # The hard limits have the last word in a round, after the areas. Never raises.
                 self._enforce_limits()
+
+                # Once a day: old history goes, so the database stops growing. Never raises.
+                self._prune_history()
 
                 self.motd()
 
