@@ -56,6 +56,10 @@ def json_serial(obj):
     raise TypeError(f"Type {type(obj)} not serializable")
 
 
+# Under gevent the web requests and the engine loop share one thread: a year of rows froze Heat and Mist control
+YEAR_REFUSED = "A year of history is not served: reading it would hold up the engine."
+
+
 class terrariumAPI(object):
     def __init__(self, webserver) -> None:
         self.webserver = webserver
@@ -1076,6 +1080,8 @@ class terrariumAPI(object):
 
     @orm.db_session(sql_debug=DEBUG, show_values=DEBUG)
     def relay_history(self, relay, action: str = "history", period: str = "day"):
+        if "year" == period:
+            raise HTTPError(status=410, body=YEAR_REFUSED)
         try:
             relay = Relay[relay]
             if "hour" == period:
@@ -1205,6 +1211,8 @@ class terrariumAPI(object):
     # Sensors
     @orm.db_session(sql_debug=DEBUG, show_values=DEBUG)
     def sensor_history(self, filter=None, action: str = "history", period: str = "day"):
+        if "year" == period:
+            raise HTTPError(status=410, body=YEAR_REFUSED)
         if "hour" == period:
             period = 1 / 24
         elif "day" == period:
