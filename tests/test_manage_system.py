@@ -90,12 +90,12 @@ def test_title_trimmed(manage):
 
 
 def test_graph_period_values(manage):
-    for value in ("day", "week", "month", "year"):
+    for value in ("day", "week", "month"):
         assert put(manage, {"graph_period": value})["graph_period"] == value
         assert manage.system_get()["graph_period"] == value
-    for value in ("decade", "Day", "", None, 1, ["day"]):
+    for value in ("year", "decade", "Day", "", None, 1, ["day"]):
         assert status_of(manage, {"graph_period": value}).status == 400
-    assert stored("graph_period") == "year"
+    assert stored("graph_period") == "month"
 
 
 def test_login_level_refused(manage, engine):

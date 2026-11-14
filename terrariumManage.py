@@ -1087,7 +1087,8 @@ class terrariumManage(object):
 
     # --- system settings ---
     SYSTEM_FIELDS = {"title", "graph_period"}
-    GRAPH_PERIODS = ("day", "week", "month", "year")
+    # No year: a year of history answers 410, it would hold up the engine (audit 2026-11-12).
+    GRAPH_PERIODS = ("day", "week", "month")
 
     @staticmethod
     def _system_body() -> dict:
@@ -1112,7 +1113,7 @@ class terrariumManage(object):
 
             if "graph_period" in body:
                 if not isinstance(body["graph_period"], str) or body["graph_period"] not in self.GRAPH_PERIODS:
-                    raise ManageError("Graph period must be day, week, month or year.")
+                    raise ManageError("Graph period must be day, week or month.")
                 changes["graph_period"] = body["graph_period"]
         except ManageError as ex:
             raise HTTPError(status=400, body=str(ex))
