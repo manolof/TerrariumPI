@@ -48,6 +48,30 @@ def test_requests_inside_the_root_are_served(filename, root, expected):
     assert static_target(filename, root) == expected
 
 
+def test_a_webcam_folder_linked_elsewhere_is_served(tmp_path, monkeypatch):
+    # Review 2026-11-14: webcam/<id> is a symlink into /dev/shm, and its stream and snapshot must be served.
+    monkeypatch.chdir(tmp_path)
+    shm = tmp_path / "shm" / "abc"
+    shm.mkdir(parents=True)
+    (shm / "stream.m3u8").write_text("#EXTM3U")
+    (tmp_path / "webcam").mkdir()
+    link = tmp_path / "webcam" / "abc"
+    try:
+        link.symlink_to(shm, target_is_directory=True)
+    except OSError:
+        try:  # Windows without the symlink right: a directory junction resolves the same way
+            import _winapi
+
+            _winapi.CreateJunction(str(shm), str(link))
+        except (ImportError, OSError):
+            pytest.skip("this system allows neither a symlink nor a junction here")
+    assert static_target("abc/stream.m3u8", "webcam") == ("webcam", "abc/stream.m3u8")
+    assert static_target("abc/abc_raw.jpg", "webcam") == ("webcam", "abc/abc_raw.jpg")
+    # A link does not open a way out with ..
+    assert static_target("abc/../../shm/abc/stream.m3u8", "webcam") is None
+    assert static_target("/etc/passwd", "webcam") is None
+
+
 def test_the_log_folder_is_not_served():
     source = (ROOT / "terrariumWebserver.py").read_text()
     route = next(line for line in source.splitlines() if "/<root:re:(" in line and "|media" in line and "filename:path" in line)

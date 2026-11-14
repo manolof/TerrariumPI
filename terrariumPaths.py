@@ -27,8 +27,11 @@ def static_target(filename: str, root: str):
     if filename in ("", ".") or "\x00" in filename:
         return None
 
-    base = os.path.realpath(root)
-    target = os.path.realpath(os.path.join(base, filename))
+    # Lexical, not resolved: `webcam/<id>` is a symlink the engine makes into /dev/shm, and its stream and
+    # snapshot must be served. What a request names can not reach outside the root with `..`; links the
+    # engine itself put inside the root are followed.
+    base = os.path.abspath(root)
+    target = os.path.normpath(os.path.join(base, filename))
     if not target.startswith(base + os.sep):
         return None
 

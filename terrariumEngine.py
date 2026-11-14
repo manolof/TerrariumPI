@@ -890,13 +890,16 @@ class terrariumEngine(object):
         hardware = self.relays.get(relay_id)
         return None if hardware is None else hardware.state
 
-    def _force_off(self, relay_id: str, reason: str) -> None:
-        if self.__relay_off(relay_id):
+    def _force_off(self, relay_id: str, reason: str) -> bool:
+        """Switches a relay off for a safety limit. True when it reads off afterwards."""
+        off = self.__relay_off(relay_id)
+        if off:
             self.relay_run_stop(relay_id)
             guardLogger.warning(f"Relay {relay_id} was switched off by a safety limit: {reason}")
         else:
             guardLogger.error(f"Relay {relay_id} did not switch off for a safety limit: {reason} It is tried again next round.")
         self._error_mail(f"limit:{relay_id}", f"A relay was switched off by a safety limit: {reason}")
+        return off
 
     def _enforce_limits(self) -> None:
         # Runs in the engine loop after the areas. Holds for manual relays too. Never raises.
@@ -918,8 +921,9 @@ class terrariumEngine(object):
                     continue
                 state = self._relay_state(relay_id)
                 if watch.over_limit(relay_id, state is None or state > 0):
-                    self._force_off(relay_id, f"Mist was on for {MIST_MAX_SECONDS // 60} minutes without a break.")
-                    watch.reset(relay_id)
+                    # Only an Off that took starts the count again: a failed one is tried again next round.
+                    if self._force_off(relay_id, f"Mist was on for {MIST_MAX_SECONDS // 60} minutes without a break."):
+                        watch.reset(relay_id)
         except Exception as ex:
             guardLogger.exception("The safety limit check of this round failed.")
             self._error_mail(
@@ -1451,7 +1455,8 @@ class terrariumEngine(object):
                 switched = hardware.set_state(terrariumRelay.ON)
             except Exception as ex:
                 relayLogger.error(f"Relay {relay_id} raised while switching on ({ex}). Its off timer is kept.")
-                raise ValueError(f"Relay {relay_id} could not be switched on.")
+                # Not a refusal (409): the relay may be on. The API answers 500, and the UI says the outcome is unknown.
+                raise RuntimeError(f"Relay {relay_id} may or may not have switched on. Its off timer is kept.")
 
             if not switched:
                 timer = self.__timed_runs.pop(relay_id, None)
@@ -1839,11 +1844,12 @@ class terrariumEngine(object):
                 # The LCD, after the parallel update so it never shares the bus with a sensor read. Never raises.
                 self._update_display()
 
-                # Run encounter/environment updates
-                self._update_enclosures()
-
-                # The hard limits have the last word in a round, after the areas. Never raises.
-                self._enforce_limits()
+                # Run encounter/environment updates. The hard limits have the last word in a round, after the
+                # areas, and run even when the area update raised (a full disk or a locked database). Never raises.
+                try:
+                    self._update_enclosures()
+                finally:
+                    self._enforce_limits()
 
                 # Once a day: old history goes, so the database stops growing. Never raises.
                 self._prune_history()

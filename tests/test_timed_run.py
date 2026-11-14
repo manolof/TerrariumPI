@@ -162,7 +162,8 @@ def test_a_failed_switch_on_leaves_no_run(mist, timers):
 def test_a_switch_on_that_raises_keeps_its_off_timer(mist, timers):
     # Audit 2026-11-12 (core I7): the relay may be on although the switch raised
     mist.relays["mist"].set_state.side_effect = RuntimeError("callback")
-    with pytest.raises(ValueError):
+    # Not a ValueError, which the API answers as a refusal (409): the outcome is unknown (500).
+    with pytest.raises(RuntimeError, match="may or may not"):
         mist.relay_run("mist", 30)
     assert "mist" in runs(mist)
     assert timers[0].interval == 30 and not timers[0].cancel.called

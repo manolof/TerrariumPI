@@ -137,6 +137,34 @@ def test_mist_on_too_long_is_switched_off():
     assert len(error_mails(engine)) == 1
 
 
+def test_a_mist_off_that_did_not_take_is_tried_again_next_round():
+    # Review 2026-11-14: the count started again after a failed Off, so the next try came 10 minutes later.
+    pump = FakeRelay(state=100.0, switch_ok=False)
+    engine = engine_with({}, mist={"pump"}, pump=pump)
+    clock = SimpleNamespace(now=0.0)
+    engine._mist_watch = OnTimer(lambda: clock.now)
+    engine._enforce_limits()
+    clock.now = MIST_MAX_SECONDS
+    engine._enforce_limits()
+    assert pump.calls == [0] and pump.state == 100.0
+    clock.now = MIST_MAX_SECONDS + 30  # the next round
+    engine._enforce_limits()
+    assert pump.calls == [0, 0]
+    pump.switch_ok = True
+    clock.now = MIST_MAX_SECONDS + 60
+    engine._enforce_limits()
+    assert pump.state == 0
+
+
+def test_the_limits_run_even_when_the_area_update_raises():
+    # Review 2026-11-14: a failing area update (a full disk, a locked database) skipped the limits.
+    engine = make_engine()
+    engine._update_enclosures.side_effect = RuntimeError("database is locked")
+    engine._enforce_limits = mock.MagicMock()
+    run_loop(engine)
+    assert engine._enforce_limits.call_count == ROUNDS
+
+
 def test_a_failing_limit_check_never_stops_the_round():
     engine = make_engine()
     engine._limit_inputs = mock.MagicMock(side_effect=RuntimeError("db"))
